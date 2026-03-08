@@ -6,9 +6,13 @@ Built for migrating [feld.com](https://feld.com) (5,530 posts, 22 years) from Wo
 
 ## Prerequisites
 
-- **Node.js 20+**
-- A WordPress site with the REST API enabled (test: `https://yoursite.com/wp-json/wp/v2/posts` should return JSON)
-- A Hugo site initialized (the scripts create content files but don't set up Hugo itself)
+- **[Node.js](https://nodejs.org/) 20+** — runs the migration scripts
+- **A WordPress site with the REST API enabled** — test by visiting `https://yoursite.com/wp-json/wp/v2/posts` (should return JSON)
+- **[Hugo](https://gohugo.io/)** — the static site generator that builds your new site (see [quick start](https://gohugo.io/getting-started/quick-start/))
+- **[Git](https://git-scm.com/) and a [GitHub](https://github.com/) account** — to store your Hugo site in a repo
+- **A hosting platform** — [Vercel](https://vercel.com/), [Netlify](https://www.netlify.com/), or [GitHub Pages](https://pages.github.com/) to serve the built site
+
+The scripts handle content migration (export, media, verification). Setting up Hugo, choosing a theme, and configuring deployment is separate — Hugo's quick start guide covers most of it.
 
 ## Quick Start
 
