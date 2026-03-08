@@ -157,7 +157,7 @@ Some WordPress plugins generate incomplete sitemaps. The verify script checks `/
 
 ## Origin
 
-These scripts were built for migrating [feld.com](https://feld.com) — 5,530 blog posts spanning 22 years — from WordPress to Hugo. The migration was done entirely with [Claude Code](https://claude.ai/code). Read the full story: [Migrating Feld.com from WordPress to Hugo](https://feld.com/archives/2026/03/migrating-feld-com-from-wordpress-to-hugo/).
+These scripts were built for migrating [feld.com](https://feld.com) — 5,530 blog posts spanning 22 years — from WordPress to Hugo. The migration was done entirely with [Claude Code](https://claude.ai/code). Read the full story: [Migrating Feld Thoughts from WordPress to Hugo](https://feld.com/archives/2026/03/migrating-feld-thoughts-from-wordpress-to-hugo/).
 
 ## License
 
