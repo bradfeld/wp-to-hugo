@@ -14,7 +14,7 @@ Built for migrating [feld.com](https://feld.com) (5,530 posts, 22 years) from Wo
 
 ```bash
 # Clone the repo
-git clone https://github.com/bfeld/wp-to-hugo.git
+git clone https://github.com/bradfeld/wp-to-hugo.git
 cd wp-to-hugo
 
 # Install dependencies
