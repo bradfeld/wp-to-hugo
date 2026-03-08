@@ -1,0 +1,5 @@
+node_modules/
+dist/
+wp-config.json
+.export-state.json
+.media-download-state.json

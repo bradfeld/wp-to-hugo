@@ -1,0 +1,8 @@
+{
+  "siteUrl": "https://example.com",
+  "contentDir": "./content",
+  "customPostTypes": [
+    { "type": "book", "section": "books" },
+    { "type": "portfolio", "section": "portfolio" }
+  ]
+}

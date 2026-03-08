@@ -1,0 +1,22 @@
+{
+  "name": "wp-to-hugo",
+  "version": "1.0.0",
+  "description": "Migrate a WordPress blog to Hugo with URL preservation",
+  "author": "Brad Feld",
+  "license": "MIT",
+  "type": "commonjs",
+  "scripts": {
+    "export": "tsx wp-export.ts",
+    "export-custom": "tsx export-custom-types.ts",
+    "media": "tsx wp-media-download.ts",
+    "fix-entities": "tsx fix-entities.ts",
+    "verify": "tsx wp-verify.ts"
+  },
+  "dependencies": {
+    "@types/node": "^25.3.5",
+    "@types/turndown": "^5.0.6",
+    "tsx": "^4.21.0",
+    "turndown": "^7.2.2",
+    "typescript": "^5.9.3"
+  }
+}
