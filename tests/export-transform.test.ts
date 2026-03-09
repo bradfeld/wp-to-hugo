@@ -27,7 +27,12 @@ test("configured transforms rewrite posts, pages, and custom post types in wp-ex
   });
 
   const post = makeFixturePost();
-  const page = makeFixturePost({ id: 43, slug: "about", title: { rendered: "About" } });
+  const page = makeFixturePost({
+    id: 43,
+    slug: "about",
+    title: { rendered: "About" },
+    link: "https://example.com/about/",
+  });
   const customPost = makeFixturePost({ id: 44, slug: "book-one", title: { rendered: "Book One" } });
   const category = makeFixtureCategory();
   const tag = makeFixtureTag();
