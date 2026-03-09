@@ -44,7 +44,7 @@ npm run verify              # Phase 5: Verify against WordPress sitemap
 | `export-custom-types.ts` | `npm run export-custom` | Exports custom post types (books, films, etc.) to separate content directories |
 | `wp-media-download.ts` | `npm run media` | Scans exported markdown for WordPress media URLs, downloads images, rewrites URLs to local paths |
 | `fix-entities.ts` | `npm run fix-entities` | Decodes HTML entities (`&amp;`, `&#8217;`, etc.) in frontmatter titles and descriptions |
-| `wp-verify.ts` | `npm run verify` | Fetches WordPress sitemap(s) and compares against Hugo content directory for missing posts |
+| `wp-verify.ts` | `npm run verify` | Fetches WordPress sitemap(s) and compares configured post, page, and category routes against Hugo content and/or built output |
 
 ## Configuration
 
@@ -54,6 +54,25 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
 {
   "siteUrl": "https://yoursite.com",
   "contentDir": "./content",
+  "postRoute": {
+    "contentPath": "archives/:year/:month/:slug",
+    "urlPath": "/archives/:year/:month/:slug/"
+  },
+  "verification": {
+    "targets": ["posts"],
+    "sources": ["content"],
+    "publicDir": "./public",
+    "categoryBasePath": "/category/",
+    "authorBasePath": "/author/"
+  },
+  "authorExport": {
+    "enabled": false,
+    "frontMatterField": "author",
+    "dataFile": "data/authors.json"
+  },
+  "contentTransform": {
+    "module": "./transforms/sample-transform.js"
+  },
   "customPostTypes": [
     { "type": "book", "section": "books" },
     { "type": "portfolio", "section": "portfolio" }
@@ -64,8 +83,144 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `siteUrl` | Yes | — | Your WordPress site URL (no trailing slash) |
-| `contentDir` | No | `./content` | Where to write Hugo content files (relative to repo root) |
+| `contentDir` | No | `./content` | Where to write Hugo content files (relative to `wp-config.json`) |
+| `postRoute.contentPath` | No | `archives/:year/:month/:slug` | Hugo bundle path pattern for exported posts |
+| `postRoute.urlPath` | No | `/archives/:year/:month/:slug/` | WordPress URL pattern used for verification and URL planning |
+| `verification.targets` | No | `["posts"]` | Which targets to verify from the sitemap |
+| `verification.sources` | No | `["content"]` | Where to discover Hugo routes: `content`, `public`, or both |
+| `verification.publicDir` | No | `./public` | Built Hugo output directory, resolved relative to `wp-config.json` |
+| `verification.categoryBasePath` | No | `/category/` | Base path used for category archive URLs |
+| `verification.authorBasePath` | No | `/author/` | Base path used for author archive URLs |
+| `authorExport.enabled` | No | `false` | Enables optional author enrichment during export |
+| `authorExport.frontMatterField` | No | `author` | Front matter field written when an author slug is resolved |
+| `authorExport.dataFile` | No | `data/authors.json` | Optional authors data file path, resolved relative to `wp-config.json` |
+| `contentTransform.module` | No | — | Path to a post-export markdown transform module, resolved relative to `wp-config.json` |
+| `contentTransform.exportName` | No | `default` | Named export to call from the transform module |
 | `customPostTypes` | No | `[]` | WordPress custom post type endpoints and their Hugo content directories |
+
+### Post Routes
+
+Post export and verification share the same route config. If you omit `postRoute`, the original archive behavior stays unchanged:
+
+- post bundles are written to `content/archives/YYYY/MM/slug/index.md`
+- verification matches `/archives/YYYY/MM/slug/`
+
+Supported route tokens are:
+
+- `:slug`
+- `:id`
+- `:year`
+- `:month`
+- `:day`
+
+Example slug-only route:
+
+```json
+{
+  "postRoute": {
+    "contentPath": "posts/:slug",
+    "urlPath": "/:slug/"
+  }
+}
+```
+
+Example day-dated route:
+
+```json
+{
+  "postRoute": {
+    "contentPath": "posts/:year/:month/:day/:slug",
+    "urlPath": "/:year/:month/:day/:slug/"
+  }
+}
+```
+
+Hugo still needs matching permalink rules for whichever `urlPath` you choose. The exporter only controls where content is written and how verification normalizes WordPress URLs.
+
+### Verification Targets
+
+If you omit `verification`, the original behavior stays in place:
+
+- only posts are verified
+- discovery comes from `content/`
+- pages and categories are ignored
+
+Available targets:
+
+- `"posts"`
+- `"pages"`
+- `"categories"`
+- `"authors"`
+
+Available discovery sources:
+
+- `"content"` scans route-owning markdown files
+- `"public"` scans generated `index.html` files in your Hugo build output
+
+You can use either source independently or both together. When both are enabled, the verifier unions discovered routes across both trees.
+
+Example multi-target configuration:
+
+```json
+{
+  "verification": {
+    "targets": ["posts", "pages", "categories", "authors"],
+    "sources": ["content", "public"],
+    "publicDir": "./public",
+    "categoryBasePath": "/category/",
+    "authorBasePath": "/author/"
+  }
+}
+```
+
+For category verification from content, the expected route-owning file is `content/categories/<slug>/_index.md`. For public discovery, the expected built path is `public/category/<slug>/index.html`.
+For author verification from content, the expected route-owning file is `content/authors/<slug>/_index.md`. For public discovery, the expected built path is `public/author/<slug>/index.html`.
+
+### Author Export
+
+Author enrichment is off by default. When you enable `authorExport`, the exporter fetches `/wp-json/wp/v2/users`, maps WordPress author IDs to slugs, and writes the configured front matter field on exported posts.
+
+```json
+{
+  "authorExport": {
+    "enabled": true,
+    "frontMatterField": "author",
+    "dataFile": "data/authors.json"
+  }
+}
+```
+
+If the WordPress `/users` endpoint is unavailable, export continues with a warning and author fields are omitted for that run. If specific author IDs are missing from an otherwise successful users response, those posts omit the field and the exporter warns once per missing ID.
+
+### Content Transforms
+
+`contentTransform` lets you apply site-specific markdown cleanup after HTML-to-Markdown conversion and before any markdown file is written.
+
+```json
+{
+  "contentTransform": {
+    "module": "./transforms/sample-transform.js",
+    "exportName": "default"
+  }
+}
+```
+
+Supported transform signature:
+
+```ts
+export default async function transform(markdown, context) {
+  return markdown;
+}
+```
+
+`context.kind` is one of `post`, `page`, or `custom-post-type`, and `context.slug` identifies the item being written. The hook runs for:
+
+- posts from `npm run export`
+- pages from `npm run export`
+- custom post types exported inside `npm run export`
+- custom post types exported by `npm run export-custom`
+
+If the module export is not a function, or the transform throws, the export fails loudly with the content kind and slug in the error.
 
 ### Custom Post Types
 
@@ -102,6 +257,8 @@ To preserve WordPress URLs, add this to your `hugo.toml`:
 ```
 
 This maps `content/archives/2024/03/my-post/index.md` to `/archives/2024/03/my-post/` — the same URL structure WordPress uses.
+
+If you change `postRoute`, update your Hugo permalinks to match that URL pattern. The default archive route is only the fallback.
 
 ## How It Works
 

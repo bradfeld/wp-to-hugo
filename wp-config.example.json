@@ -1,6 +1,25 @@
 {
   "siteUrl": "https://example.com",
   "contentDir": "./content",
+  "postRoute": {
+    "contentPath": "archives/:year/:month/:slug",
+    "urlPath": "/archives/:year/:month/:slug/"
+  },
+  "verification": {
+    "targets": ["posts"],
+    "sources": ["content"],
+    "publicDir": "./public",
+    "categoryBasePath": "/category/",
+    "authorBasePath": "/author/"
+  },
+  "authorExport": {
+    "enabled": false,
+    "frontMatterField": "author",
+    "dataFile": "data/authors.json"
+  },
+  "contentTransform": {
+    "module": "./transforms/sample-transform.js"
+  },
   "customPostTypes": [
     { "type": "book", "section": "books" },
     { "type": "portfolio", "section": "portfolio" }
