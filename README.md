@@ -44,7 +44,7 @@ npm run verify              # Phase 5: Verify against WordPress sitemap
 | `export-custom-types.ts` | `npm run export-custom` | Exports custom post types (books, films, etc.) to separate content directories |
 | `wp-media-download.ts` | `npm run media` | Scans exported markdown for WordPress media URLs, downloads images, rewrites URLs to local paths |
 | `fix-entities.ts` | `npm run fix-entities` | Decodes HTML entities (`&amp;`, `&#8217;`, etc.) in frontmatter titles and descriptions |
-| `wp-verify.ts` | `npm run verify` | Fetches WordPress sitemap(s) and compares against Hugo content directory for missing posts |
+| `wp-verify.ts` | `npm run verify` | Fetches WordPress sitemap(s) and compares configured post, page, and category routes against Hugo content and/or built output |
 
 ## Configuration
 
@@ -57,6 +57,12 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
   "postRoute": {
     "contentPath": "archives/:year/:month/:slug",
     "urlPath": "/archives/:year/:month/:slug/"
+  },
+  "verification": {
+    "targets": ["posts"],
+    "sources": ["content"],
+    "publicDir": "./public",
+    "categoryBasePath": "/category/"
   },
   "customPostTypes": [
     { "type": "book", "section": "books" },
@@ -71,6 +77,10 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
 | `contentDir` | No | `./content` | Where to write Hugo content files (relative to `wp-config.json`) |
 | `postRoute.contentPath` | No | `archives/:year/:month/:slug` | Hugo bundle path pattern for exported posts |
 | `postRoute.urlPath` | No | `/archives/:year/:month/:slug/` | WordPress URL pattern used for verification and URL planning |
+| `verification.targets` | No | `["posts"]` | Which targets to verify from the sitemap |
+| `verification.sources` | No | `["content"]` | Where to discover Hugo routes: `content`, `public`, or both |
+| `verification.publicDir` | No | `./public` | Built Hugo output directory, resolved relative to `wp-config.json` |
+| `verification.categoryBasePath` | No | `/category/` | Base path used for category archive URLs |
 | `customPostTypes` | No | `[]` | WordPress custom post type endpoints and their Hugo content directories |
 
 ### Post Routes
@@ -111,6 +121,42 @@ Example day-dated route:
 ```
 
 Hugo still needs matching permalink rules for whichever `urlPath` you choose. The exporter only controls where content is written and how verification normalizes WordPress URLs.
+
+### Verification Targets
+
+If you omit `verification`, the original behavior stays in place:
+
+- only posts are verified
+- discovery comes from `content/`
+- pages and categories are ignored
+
+Available targets:
+
+- `"posts"`
+- `"pages"`
+- `"categories"`
+
+Available discovery sources:
+
+- `"content"` scans route-owning markdown files
+- `"public"` scans generated `index.html` files in your Hugo build output
+
+You can use either source independently or both together. When both are enabled, the verifier unions discovered routes across both trees.
+
+Example multi-target configuration:
+
+```json
+{
+  "verification": {
+    "targets": ["posts", "pages", "categories"],
+    "sources": ["content", "public"],
+    "publicDir": "./public",
+    "categoryBasePath": "/category/"
+  }
+}
+```
+
+For category verification from content, the expected route-owning file is `content/categories/<slug>/_index.md`. For public discovery, the expected built path is `public/category/<slug>/index.html`.
 
 ### Custom Post Types
 

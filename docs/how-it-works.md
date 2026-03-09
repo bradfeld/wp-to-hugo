@@ -233,6 +233,42 @@ The script reports:
 - **Missing posts** (in WordPress but not in Hugo)
 - **Extra posts** (in Hugo but not in WordPress — usually fine, could be drafts you published after export)
 
+### Multi-target verification
+
+Verification now supports:
+
+- posts
+- pages
+- categories
+
+The default config remains backward compatible:
+
+```json
+{
+  "verification": {
+    "targets": ["posts"],
+    "sources": ["content"],
+    "publicDir": "./public",
+    "categoryBasePath": "/category/"
+  }
+}
+```
+
+When you expand `verification.targets`, the verifier classifies sitemap URLs into one or more target candidates, discovers Hugo route keys from the configured sources, and then resolves overlaps against what Hugo actually owns.
+
+Discovery sources:
+
+- `content`: scans route-owning markdown files such as `content/about.md` and `content/categories/essays/_index.md`
+- `public`: scans built output such as `public/about/index.html` and `public/category/essays/index.html`
+
+If you enable both, the discovered route keys are unioned before comparison.
+
+### Overlapping route spaces
+
+Some sites use overlapping route spaces, especially slug-only posts and root-level pages. In that case the verifier keeps multiple candidates for a sitemap URL and resolves them against the discovered Hugo outputs instead of assuming a target up front.
+
+If more than one candidate remains plausible after discovery, the verifier reports that URL in a separate ambiguity section instead of silently counting it as matched or missing.
+
 ### What "100%" means
 
 A 100% match rate means every URL in the WordPress sitemap has a corresponding Hugo content file. This is the target before switching DNS.

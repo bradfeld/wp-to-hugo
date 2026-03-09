@@ -1,9 +1,18 @@
-import fs from "node:fs";
-import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadConfig, type ResolvedConfig } from "./config";
-import { normalizeHugoPostPath, normalizeWordPressPostUrl } from "./routing";
+import {
+  loadConfig,
+  type ResolvedConfig,
+  type VerificationTarget,
+} from "./config";
+import {
+  classifySitemapUrlCandidates,
+  collectRouteKeys,
+  extractSitemapLocs,
+  resolveVerificationMatches,
+  type VerificationKeySets,
+  type VerificationMatch,
+} from "./verification-targets";
 
 interface Logger {
   log: (...args: unknown[]) => void;
@@ -24,11 +33,15 @@ interface TargetReport {
   extra: string[];
 }
 
+interface AmbiguityReport {
+  url: string;
+  candidates: VerificationMatch[];
+}
+
 export interface VerificationResult {
   perfect: boolean;
-  targets: {
-    posts: TargetReport;
-  };
+  targets: Record<VerificationTarget, TargetReport>;
+  ambiguities: AmbiguityReport[];
 }
 
 const DELAY_MS = 100;
@@ -45,94 +58,44 @@ async function fetchSitemapXml(fetchImpl: typeof fetch, url: string): Promise<st
   return response.text();
 }
 
-function extractLocs(xml: string): string[] {
-  const locRegex = /<loc>(.*?)<\/loc>/g;
-  const urls: string[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = locRegex.exec(xml)) !== null) {
-    urls.push(match[1]);
-  }
-
-  return urls;
+function emptyWordPressMatches(): VerificationKeySets {
+  return {
+    posts: new Set<string>(),
+    pages: new Set<string>(),
+    categories: new Set<string>(),
+  };
 }
 
-async function fetchAllWordPressUrls(
+async function fetchAllSitemapUrls(
   config: ResolvedConfig,
   fetchImpl: typeof fetch,
   logger: Logger,
-): Promise<Set<string>> {
-  const keys = new Set<string>();
+): Promise<string[]> {
   const mainUrl = `${config.siteUrl}/sitemap.xml`;
   logger.log(`  Fetching ${mainUrl}...`);
-
   const mainXml = await fetchSitemapXml(fetchImpl, mainUrl);
-  if (mainXml.includes("<sitemapindex")) {
-    const childUrls = extractLocs(mainXml);
-    logger.log(`  Found sitemap index with ${childUrls.length} child sitemaps`);
 
-    for (const childUrl of childUrls) {
-      try {
-        const childXml = await fetchSitemapXml(fetchImpl, childUrl);
-        let added = 0;
-        for (const url of extractLocs(childXml)) {
-          const key = normalizeWordPressPostUrl(url, config.postRoute.urlPath);
-          if (key) {
-            keys.add(key);
-            added += 1;
-          }
-        }
-        logger.log(`  ${childUrl.split("/").pop() || childUrl}: ${added} matching URLs`);
-        await delay(DELAY_MS);
-      } catch (error) {
-        logger.error(`  ✗ ${childUrl}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    return keys;
+  if (!mainXml.includes("<sitemapindex")) {
+    return extractSitemapLocs(mainXml);
   }
 
-  for (const url of extractLocs(mainXml)) {
-    const key = normalizeWordPressPostUrl(url, config.postRoute.urlPath);
-    if (key) {
-      keys.add(key);
-    }
-  }
-  logger.log(`  Found ${keys.size} matching URLs in sitemap`);
-  return keys;
-}
+  const allUrls: string[] = [];
+  const childUrls = extractSitemapLocs(mainXml);
+  logger.log(`  Found sitemap index with ${childUrls.length} child sitemaps`);
 
-function walkIndexFiles(dir: string): string[] {
-  if (!fs.existsSync(dir)) {
-    return [];
-  }
-
-  const files: string[] = [];
-
-  function walk(currentDir: string): void {
-    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        walk(fullPath);
-      } else if (entry.name === "index.md") {
-        files.push(fullPath);
-      }
+  for (const childUrl of childUrls) {
+    try {
+      const childXml = await fetchSitemapXml(fetchImpl, childUrl);
+      const childEntries = extractSitemapLocs(childXml);
+      allUrls.push(...childEntries);
+      logger.log(`  ${childUrl.split("/").pop() || childUrl}: ${childEntries.length} URLs`);
+      await delay(DELAY_MS);
+    } catch (error) {
+      logger.error(`  ✗ ${childUrl}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  walk(dir);
-  return files;
-}
-
-function buildHugoKeySet(config: ResolvedConfig): Set<string> {
-  const keys = new Set<string>();
-  for (const filePath of walkIndexFiles(config.contentDir)) {
-    const key = normalizeHugoPostPath(filePath, config.contentDir, config.postRoute);
-    if (key) {
-      keys.add(key);
-    }
-  }
-  return keys;
+  return allUrls;
 }
 
 function buildTargetReport(wordpress: Set<string>, hugo: Set<string>): TargetReport {
@@ -166,39 +129,88 @@ function buildTargetReport(wordpress: Set<string>, hugo: Set<string>): TargetRep
   };
 }
 
-function printReport(config: ResolvedConfig, report: TargetReport, logger: Logger): boolean {
+function renderPublicUrl(config: ResolvedConfig, target: VerificationTarget, key: string): string {
+  if (target === "categories") {
+    const categoryBase = config.verification.categoryBasePath.replace(/^\/+|\/+$/g, "");
+    return `${config.siteUrl}/${categoryBase}/${key}/`;
+  }
+
+  return `${config.siteUrl}/${key}/`;
+}
+
+function printTargetReport(
+  config: ResolvedConfig,
+  target: VerificationTarget,
+  report: TargetReport,
+  logger: Logger,
+): void {
   const total = report.wordpress.size;
   const matchRate = total > 0 ? ((report.matched / total) * 100).toFixed(2) : "0.00";
 
-  logger.log("\n=== Verification Report ===");
-  logger.log(`WordPress posts: ${report.wordpress.size}`);
-  logger.log(`Hugo posts:      ${report.hugo.size}`);
-  logger.log(`Matched:         ${report.matched}`);
-  logger.log(`Missing (WP→Hugo): ${report.missing.length}`);
-  logger.log(`Extra (Hugo only):  ${report.extra.length}`);
-  logger.log(`Match rate:      ${matchRate}%`);
+  logger.log(`\n=== ${target} ===`);
+  logger.log(`WordPress: ${report.wordpress.size}`);
+  logger.log(`Hugo:      ${report.hugo.size}`);
+  logger.log(`Matched:   ${report.matched}`);
+  logger.log(`Missing:   ${report.missing.length}`);
+  logger.log(`Extra:     ${report.extra.length}`);
+  logger.log(`Match rate:${matchRate}%`);
 
   if (report.missing.length > 0) {
-    logger.log("\n=== Missing Posts (in WordPress but not Hugo) ===");
+    logger.log("Missing URLs:");
     for (const key of report.missing) {
-      logger.log(`  ${config.siteUrl}/${key}/`);
+      logger.log(`  ${renderPublicUrl(config, target, key)}`);
     }
   }
+}
 
-  if (report.extra.length > 0) {
-    logger.log("\n=== Extra Posts (in Hugo but not WordPress) ===");
-    for (const key of report.extra) {
-      logger.log(`  ${key}`);
+function printAmbiguities(ambiguities: AmbiguityReport[], logger: Logger): void {
+  if (ambiguities.length === 0) {
+    return;
+  }
+
+  logger.log("\n=== Ambiguities ===");
+  for (const ambiguity of ambiguities) {
+    const targets = ambiguity.candidates.map((candidate) => `${candidate.target}:${candidate.key}`).join(", ");
+    logger.log(`  ${ambiguity.url} -> ${targets}`);
+  }
+}
+
+function addWordPressMatch(match: VerificationMatch, wordpressMatches: VerificationKeySets): void {
+  wordpressMatches[match.target].add(match.key);
+}
+
+function classifyAgainstDiscovered(
+  urls: string[],
+  config: ResolvedConfig,
+  discovered: VerificationKeySets,
+): { wordpressMatches: VerificationKeySets; ambiguities: AmbiguityReport[] } {
+  const wordpressMatches = emptyWordPressMatches();
+  const ambiguities: AmbiguityReport[] = [];
+
+  for (const url of urls) {
+    const candidates = classifySitemapUrlCandidates(url, config);
+    if (candidates.length === 0) {
+      continue;
     }
+
+    if (candidates.length === 1) {
+      addWordPressMatch(candidates[0], wordpressMatches);
+      continue;
+    }
+
+    const resolved = resolveVerificationMatches(candidates, discovered);
+    if (resolved.length === 1) {
+      addWordPressMatch(resolved[0], wordpressMatches);
+      continue;
+    }
+
+    ambiguities.push({
+      url,
+      candidates: resolved.length > 0 ? resolved : candidates,
+    });
   }
 
-  if (report.missing.length === 0) {
-    logger.log("\n✓ All WordPress posts have corresponding Hugo content!");
-    return true;
-  }
-
-  logger.log(`\n✗ ${report.missing.length} WordPress post(s) missing from Hugo content.`);
-  return false;
+  return { wordpressMatches, ambiguities };
 }
 
 export async function runVerification(
@@ -210,21 +222,35 @@ export async function runVerification(
 
   logger.log("=== WordPress ↔ Hugo Verification ===\n");
   logger.log("Phase 1: Fetching WordPress sitemaps...");
-  const wordpressPosts = await fetchAllWordPressUrls(config, fetchImpl, logger);
-  logger.log(`  Total unique matching URLs: ${wordpressPosts.size}\n`);
+  const sitemapUrls = await fetchAllSitemapUrls(config, fetchImpl, logger);
+  logger.log(`  Total sitemap URLs: ${sitemapUrls.length}\n`);
 
-  logger.log("Phase 2: Walking Hugo content...");
-  const hugoPosts = buildHugoKeySet(config);
-  logger.log(`  Total Hugo posts for configured route: ${hugoPosts.size}`);
+  logger.log("Phase 2: Discovering Hugo routes...");
+  const discovered = collectRouteKeys(config);
+  logger.log(`  Posts: ${discovered.posts.size}`);
+  logger.log(`  Pages: ${discovered.pages.size}`);
+  logger.log(`  Categories: ${discovered.categories.size}`);
 
-  const postsReport = buildTargetReport(wordpressPosts, hugoPosts);
-  const perfect = printReport(config, postsReport, logger);
+  const { wordpressMatches, ambiguities } = classifyAgainstDiscovered(sitemapUrls, config, discovered);
+  const targets = {
+    posts: buildTargetReport(wordpressMatches.posts, discovered.posts),
+    pages: buildTargetReport(wordpressMatches.pages, discovered.pages),
+    categories: buildTargetReport(wordpressMatches.categories, discovered.categories),
+  };
+
+  for (const target of config.verification.targets) {
+    printTargetReport(config, target, targets[target], logger);
+  }
+  printAmbiguities(ambiguities, logger);
+
+  const perfect =
+    ambiguities.length === 0 &&
+    config.verification.targets.every((target) => targets[target].missing.length === 0);
 
   return {
     perfect,
-    targets: {
-      posts: postsReport,
-    },
+    targets,
+    ambiguities,
   };
 }
 

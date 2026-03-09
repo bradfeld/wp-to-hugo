@@ -12,10 +12,26 @@ export interface RoutePatternConfig {
   urlPath: string;
 }
 
+export type VerificationTarget = "posts" | "pages" | "categories";
+export type VerificationSource = "content" | "public";
+
+export interface VerificationConfig {
+  targets: VerificationTarget[];
+  sources: VerificationSource[];
+  publicDir: string;
+  categoryBasePath: string;
+}
+
 interface WpToHugoConfig {
   siteUrl: string;
   contentDir?: string;
   postRoute?: Partial<RoutePatternConfig>;
+  verification?: {
+    targets?: VerificationTarget[];
+    sources?: VerificationSource[];
+    publicDir?: string;
+    categoryBasePath?: string;
+  };
   customPostTypes?: Array<{ type: string; section: string }>;
 }
 
@@ -30,12 +46,20 @@ export interface ResolvedConfig {
   domainRegex: string;
   mediaUrlRegex: RegExp;
   postRoute: RoutePatternConfig;
+  verification: VerificationConfig;
   customPostTypes: Array<{ type: string; section: string }>;
 }
 
 const DEFAULT_POST_ROUTE: RoutePatternConfig = {
   contentPath: "archives/:year/:month/:slug",
   urlPath: "/archives/:year/:month/:slug/",
+};
+
+const DEFAULT_VERIFICATION = {
+  targets: ["posts"] as VerificationTarget[],
+  sources: ["content"] as VerificationSource[],
+  publicDir: "./public",
+  categoryBasePath: "/category/",
 };
 
 function escapeRegex(str: string): string {
@@ -85,6 +109,12 @@ export function loadConfig(configPath?: string): ResolvedConfig {
     contentPath: raw.postRoute?.contentPath || DEFAULT_POST_ROUTE.contentPath,
     urlPath: raw.postRoute?.urlPath || DEFAULT_POST_ROUTE.urlPath,
   };
+  const verification: VerificationConfig = {
+    targets: raw.verification?.targets || DEFAULT_VERIFICATION.targets,
+    sources: raw.verification?.sources || DEFAULT_VERIFICATION.sources,
+    publicDir: path.resolve(configDir, raw.verification?.publicDir || DEFAULT_VERIFICATION.publicDir),
+    categoryBasePath: raw.verification?.categoryBasePath || DEFAULT_VERIFICATION.categoryBasePath,
+  };
 
   assertSupportedRoutePattern(postRoute.contentPath, "postRoute.contentPath");
   assertSupportedRoutePattern(postRoute.urlPath, "postRoute.urlPath");
@@ -108,6 +138,7 @@ export function loadConfig(configPath?: string): ResolvedConfig {
     domainRegex,
     mediaUrlRegex,
     postRoute,
+    verification,
     customPostTypes: raw.customPostTypes || [],
   };
 }
