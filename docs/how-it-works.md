@@ -73,6 +73,36 @@ content/archives/YYYY/MM/slug/index.md
 
 This preserves the WordPress URL structure. With the right permalink config in `hugo.toml`, every old URL continues to work without redirects.
 
+That archive layout is now the default, not a hardcoded requirement. `postRoute.contentPath` controls where post bundles are written, and `postRoute.urlPath` controls the matching WordPress route pattern used for verification. When `postRoute` is omitted, the exporter and verifier still use the legacy archive behavior.
+
+Supported route tokens:
+
+- `:slug`
+- `:id`
+- `:year`
+- `:month`
+- `:day`
+
+Examples:
+
+```json
+{
+  "postRoute": {
+    "contentPath": "posts/:slug",
+    "urlPath": "/:slug/"
+  }
+}
+```
+
+```json
+{
+  "postRoute": {
+    "contentPath": "posts/:year/:month/:day/:slug",
+    "urlPath": "/:year/:month/:day/:slug/"
+  }
+}
+```
+
 Static pages go to the content root: `content/about.md`, `content/contact.md`, etc.
 
 ### Resumable state
@@ -194,14 +224,60 @@ The script fetches `/sitemap.xml` from your WordPress site. If it's a sitemap in
 ### Comparison logic
 
 For each URL in the WordPress sitemap:
-1. Extract the path (`/archives/2024/03/my-post/`)
-2. Normalize to a key (`2024/03/my-post`)
-3. Check for a matching Hugo file (`content/archives/2024/03/my-post/index.md`)
+1. Extract the path and validate it against `postRoute.urlPath`
+2. Normalize the rendered route path to a verification key
+3. Check for a matching Hugo file by projecting `content/*/index.md` paths through `postRoute.contentPath`
 
 The script reports:
 - **Match rate** (percentage of WordPress URLs found in Hugo)
 - **Missing posts** (in WordPress but not in Hugo)
 - **Extra posts** (in Hugo but not in WordPress — usually fine, could be drafts you published after export)
+
+### Multi-target verification
+
+Verification now supports:
+
+- posts
+- pages
+- categories
+- authors
+
+The default config remains backward compatible:
+
+```json
+{
+  "verification": {
+    "targets": ["posts"],
+    "sources": ["content"],
+    "publicDir": "./public",
+    "categoryBasePath": "/category/",
+    "authorBasePath": "/author/"
+  }
+}
+```
+
+When you expand `verification.targets`, the verifier classifies sitemap URLs into one or more target candidates, discovers Hugo route keys from the configured sources, and then resolves overlaps against what Hugo actually owns.
+
+Discovery sources:
+
+- `content`: scans route-owning markdown files such as `content/about.md` and `content/categories/essays/_index.md`
+- `public`: scans built output such as `public/about/index.html`, `public/category/essays/index.html`, and `public/author/jane-doe/index.html`
+
+If you enable both, the discovered route keys are unioned before comparison.
+
+### Overlapping route spaces
+
+Some sites use overlapping route spaces, especially slug-only posts and root-level pages. In that case the verifier keeps multiple candidates for a sitemap URL and resolves them against the discovered Hugo outputs instead of assuming a target up front.
+
+If more than one candidate remains plausible after discovery, the verifier reports that URL in a separate ambiguity section instead of silently counting it as matched or missing.
+
+### Author export
+
+Author export is optional and off by default. When enabled, the exporter fetches `/wp-json/wp/v2/users`, builds an `id -> slug` map, and appends the configured front matter field to posts when a matching user exists.
+
+It can also write a stable JSON data file for Hugo usage, using the configured `authorExport.dataFile` path. The file contents are sorted by slug so reruns remain deterministic.
+
+If `/users` is unavailable, export continues successfully with a warning and skips author enrichment for that run. If a post references an author ID that is missing from an otherwise successful users response, the exporter omits the field and warns once per missing ID.
 
 ### What "100%" means
 
@@ -213,12 +289,12 @@ A 100% match rate means every URL in the WordPress sitemap has a corresponding H
 
 The most important aspect of a WordPress-to-Hugo migration is preserving URLs. Every inbound link, bookmark, and search engine result should continue to work.
 
-WordPress typically uses this URL structure:
+The default WordPress route in this project is:
 ```
 https://yoursite.com/archives/2024/03/my-post-slug/
 ```
 
-Hugo page bundles mirror this exactly:
+The default Hugo page bundle mirrors that exactly:
 ```
 content/archives/2024/03/my-post-slug/index.md
 ```
@@ -231,12 +307,7 @@ With the permalink configuration:
 
 Hugo generates the same URLs. No redirects needed.
 
-### Other URL patterns
-
-If your WordPress site uses a different permalink structure (e.g., `/blog/my-post/` or `/?p=123`), you'll need to adjust:
-1. The content directory structure in the export script
-2. The Hugo permalink configuration
-3. The verification script's URL-to-key mapping
+Other permalink shapes are now configured in `wp-config.json` instead of patching the scripts. If you use a different `postRoute`, your Hugo permalink configuration needs to emit the same public URLs.
 
 ---
 
