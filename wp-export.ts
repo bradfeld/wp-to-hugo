@@ -1,16 +1,11 @@
-// wp-export.ts
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+
 import TurndownService from "turndown";
-import { loadConfig } from "./config";
 
-const config = loadConfig();
-const WP_API = config.wpApiUrl;
-const CONTENT_DIR = config.contentDir;
-const STATE_FILE = path.resolve(process.cwd(), ".export-state.json");
-const DELAY_MS = 100; // Rate limiting between API calls
-
-// --- Types ---
+import { loadConfig, type ResolvedConfig } from "./config";
+import { buildPostRoutePlan, normalizeSiteRelativePath } from "./routing";
 
 interface WPPost {
   id: number;
@@ -44,49 +39,30 @@ interface ExportState {
   customTypesExported: string[];
 }
 
-// --- Utilities ---
-
-async function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+interface Logger {
+  log: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
 }
 
-async function fetchJSON<T>(
-  url: string,
-): Promise<{ data: T; total: number; totalPages: number }> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`API error ${res.status}: ${url}`);
-  const data = (await res.json()) as T;
-  const total = parseInt(res.headers.get("X-WP-Total") || "0", 10);
-  const totalPages = parseInt(res.headers.get("X-WP-TotalPages") || "0", 10);
-  return { data, total, totalPages };
+export interface ExportOptions {
+  fetch?: typeof fetch;
+  logger?: Logger;
+  stateFile?: string;
 }
 
-async function fetchAllPages<T>(
-  endpoint: string,
-  params = "",
-): Promise<T[]> {
-  const all: T[] = [];
-  let page = 1;
-  let totalPages = 1;
-
-  do {
-    const separator = params ? "&" : "?";
-    const url = `${WP_API}/${endpoint}?per_page=100&page=${page}${params ? separator + params : ""}`;
-    console.log(`  Fetching ${endpoint} page ${page}/${totalPages}...`);
-    const result = await fetchJSON<T[]>(url);
-    all.push(...result.data);
-    totalPages = result.totalPages;
-    page++;
-    await delay(DELAY_MS);
-  } while (page <= totalPages);
-
-  return all;
+export interface ExportResult {
+  state: ExportState;
+  outputPaths: {
+    posts: string[];
+    customPostTypes: string[];
+    pages: string[];
+  };
 }
 
-function loadState(): ExportState {
-  if (fs.existsSync(STATE_FILE)) {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
-  }
+const DELAY_MS = 100;
+
+function createInitialState(): ExportState {
   return {
     phase: "init",
     postsExported: 0,
@@ -98,11 +74,9 @@ function loadState(): ExportState {
   };
 }
 
-function saveState(state: ExportState): void {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+async function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-// --- HTML to Markdown ---
 
 function createTurndown(): TurndownService {
   const td = new TurndownService({
@@ -112,29 +86,25 @@ function createTurndown(): TurndownService {
     emDelimiter: "*",
   });
 
-  // Strip WordPress block comments
   td.addRule("wpBlockComments", {
-    filter: (node) => {
-      return node.nodeType === 8; // Comment node
-    },
+    filter: (node) => node.nodeType === 8,
     replacement: () => "",
   });
 
-  // Handle WordPress caption shortcode remnants
   td.addRule("wpCaption", {
     filter: (node) => {
-      const el = node as HTMLElement;
-      return el.classList?.contains("wp-caption") || false;
+      const element = node as HTMLElement;
+      return element.classList?.contains("wp-caption") || false;
     },
     replacement: (_content, node) => {
-      const el = node as HTMLElement;
-      const img = el.querySelector("img");
-      const caption = el.querySelector(".wp-caption-text");
-      if (img) {
-        const alt = caption?.textContent || img.alt || "";
-        return `\n\n![${alt}](${img.src})\n\n`;
+      const element = node as HTMLElement;
+      const image = element.querySelector("img");
+      const caption = element.querySelector(".wp-caption-text");
+      if (!image) {
+        return "";
       }
-      return "";
+      const alt = caption?.textContent || image.alt || "";
+      return `\n\n![${alt}](${image.src})\n\n`;
     },
   });
 
@@ -142,46 +112,47 @@ function createTurndown(): TurndownService {
 }
 
 function htmlToMarkdown(html: string): string {
-  // Strip WordPress block comments before turndown
   let cleaned = html.replace(/<!--\s*\/?wp:\w+[^>]*-->/g, "");
-  // Strip empty paragraphs
   cleaned = cleaned.replace(/<p>\s*<\/p>/g, "");
-  // Convert WordPress shortcodes we can handle
   cleaned = cleaned.replace(/\[caption[^\]]*\](.*?)\[\/caption\]/gs, "$1");
 
   const td = createTurndown();
-  let md = td.turndown(cleaned);
-
-  // Clean up excessive newlines
-  md = md.replace(/\n{3,}/g, "\n\n");
-
-  return md.trim();
+  let markdown = td.turndown(cleaned);
+  markdown = markdown.replace(/\n{3,}/g, "\n\n");
+  return markdown.trim();
 }
-
-// --- Post Writer ---
 
 function decodeHtmlEntities(text: string): string {
   const entityMap: Record<string, string> = {
-    "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
-    "&hellip;": "...", "&ndash;": "\u2013", "&mdash;": "\u2014",
-    "&lsquo;": "\u2018", "&rsquo;": "\u2019", "&ldquo;": "\u201C",
-    "&rdquo;": "\u201D", "&nbsp;": " ", "&copy;": "\u00A9",
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+    "&quot;": '"',
+    "&apos;": "'",
+    "&hellip;": "...",
+    "&ndash;": "\u2013",
+    "&mdash;": "\u2014",
+    "&lsquo;": "\u2018",
+    "&rsquo;": "\u2019",
+    "&ldquo;": "\u201C",
+    "&rdquo;": "\u201D",
+    "&nbsp;": " ",
+    "&copy;": "\u00A9",
   };
   let result = text;
   for (const [entity, char] of Object.entries(entityMap)) {
     result = result.replaceAll(entity, char);
   }
-  result = result.replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(parseInt(n, 10)));
-  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_m, h) => String.fromCharCode(parseInt(h, 16)));
+  result = result.replace(/&#(\d+);/g, (_match, numeric) => String.fromCharCode(parseInt(numeric, 10)));
+  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_match, hex) => String.fromCharCode(parseInt(hex, 16)));
   return result;
 }
 
-function escapeYamlString(s: string): string {
-  // If string contains special chars, wrap in double quotes
-  if (/[:"'\[\]{}#&*!|>%@`]/.test(s) || s.includes("\n")) {
-    return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+function escapeYamlString(value: string): string {
+  if (/[:"'\[\]{}#&*!|>%@`]/.test(value) || value.includes("\n")) {
+    return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   }
-  return `"${s}"`;
+  return `"${value}"`;
 }
 
 function generateFrontmatter(
@@ -189,241 +160,312 @@ function generateFrontmatter(
   categoryMap: Map<number, string>,
   tagMap: Map<number, string>,
 ): string {
-  const categories = post.categories
-    .map((id) => categoryMap.get(id))
-    .filter(Boolean);
+  const categories = post.categories.map((id) => categoryMap.get(id)).filter(Boolean);
   const tags = post.tags.map((id) => tagMap.get(id)).filter(Boolean);
-
-  // Decode HTML entities in title
   const title = decodeHtmlEntities(post.title.rendered);
-
-  // Extract first sentence for description if no excerpt
   const excerpt = decodeHtmlEntities(
-    post.excerpt.rendered
-      .replace(/<[^>]+>/g, "")
-      .replace(/\n/g, " ")
-      .trim()
+    post.excerpt.rendered.replace(/<[^>]+>/g, "").replace(/\n/g, " ").trim(),
   );
   const description = excerpt.slice(0, 200);
 
-  let fm = "---\n";
-  fm += `title: ${escapeYamlString(title)}\n`;
-  fm += `date: ${post.date}\n`;
-  fm += `slug: "${post.slug}"\n`;
+  let frontmatter = "---\n";
+  frontmatter += `title: ${escapeYamlString(title)}\n`;
+  frontmatter += `date: ${post.date}\n`;
+  frontmatter += `slug: "${post.slug}"\n`;
   if (categories.length > 0) {
-    fm += `categories: [${categories.map((c) => escapeYamlString(c!)).join(", ")}]\n`;
+    frontmatter += `categories: [${categories.map((value) => escapeYamlString(value!)).join(", ")}]\n`;
   }
   if (tags.length > 0) {
-    fm += `tags: [${tags.map((t) => escapeYamlString(t!)).join(", ")}]\n`;
+    frontmatter += `tags: [${tags.map((value) => escapeYamlString(value!)).join(", ")}]\n`;
   }
   if (description) {
-    fm += `description: ${escapeYamlString(description)}\n`;
+    frontmatter += `description: ${escapeYamlString(description)}\n`;
   }
-  fm += `draft: false\n`;
-  fm += "---\n";
+  frontmatter += "draft: false\n";
+  frontmatter += "---\n";
 
-  return fm;
+  return frontmatter;
 }
 
-function writePost(
-  post: WPPost,
-  markdown: string,
-  frontmatter: string,
-  section: string = "archives",
-): string {
-  // Parse date for directory structure
-  const date = new Date(post.date);
-  const year = date.getFullYear().toString();
-  const month = (date.getMonth() + 1).toString().padStart(2, "0");
-
-  let postDir: string;
-  if (section === "archives") {
-    // Blog posts: content/archives/YYYY/MM/slug/index.md
-    postDir = path.join(CONTENT_DIR, "archives", year, month, post.slug);
-  } else {
-    // Custom post types: content/section/slug/index.md
-    postDir = path.join(CONTENT_DIR, section, post.slug);
-  }
-
-  fs.mkdirSync(postDir, { recursive: true });
-
-  const filePath = path.join(postDir, "index.md");
-  fs.writeFileSync(filePath, frontmatter + "\n" + markdown);
-
+function writeBundle(filePath: string, frontmatter: string, markdown: string): string {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${frontmatter}\n${markdown}`);
   return filePath;
 }
 
-// --- Main Export ---
-
-async function exportTaxonomies(): Promise<{
-  categoryMap: Map<number, string>;
-  tagMap: Map<number, string>;
-}> {
-  console.log("Phase 1: Loading taxonomies...");
-
-  const categories = await fetchAllPages<WPTerm>("categories");
-  const categoryMap = new Map<number, string>();
-  for (const cat of categories) {
-    categoryMap.set(cat.id, cat.name);
+function writePost(
+  config: ResolvedConfig,
+  post: WPPost,
+  markdown: string,
+  frontmatter: string,
+  section = "archives",
+): string {
+  if (section !== "archives") {
+    const filePath = path.join(config.contentDir, section, post.slug, "index.md");
+    return writeBundle(filePath, frontmatter, markdown);
   }
-  console.log(`  Loaded ${categories.length} categories`);
 
-  const tags = await fetchAllPages<WPTerm>("tags");
-  const tagMap = new Map<number, string>();
-  for (const tag of tags) {
-    tagMap.set(tag.id, tag.name);
+  const routePlan = buildPostRoutePlan(post, config.postRoute);
+  const filePath = path.join(config.contentDir, ...routePlan.indexFile.split("/"));
+  return writeBundle(filePath, frontmatter, markdown);
+}
+
+function loadState(stateFile: string): ExportState {
+  if (!fs.existsSync(stateFile)) {
+    return createInitialState();
   }
-  console.log(`  Loaded ${tags.length} tags`);
+  return JSON.parse(fs.readFileSync(stateFile, "utf-8")) as ExportState;
+}
 
-  return { categoryMap, tagMap };
+function saveState(stateFile: string, state: ExportState): void {
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+}
+
+async function fetchJSON<T>(
+  fetchImpl: typeof fetch,
+  url: string,
+): Promise<{ data: T; total: number; totalPages: number }> {
+  const response = await fetchImpl(url);
+  if (!response.ok) {
+    throw new Error(`API error ${response.status}: ${url}`);
+  }
+  const data = await response.json() as T;
+  const total = parseInt(response.headers.get("X-WP-Total") || "0", 10);
+  const totalPages = parseInt(response.headers.get("X-WP-TotalPages") || "0", 10);
+  return { data, total, totalPages };
+}
+
+async function fetchAllPages<T>(
+  fetchImpl: typeof fetch,
+  wpApiUrl: string,
+  endpoint: string,
+  logger: Logger,
+  params = "",
+): Promise<T[]> {
+  const all: T[] = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const separator = params ? "&" : "?";
+    const url = `${wpApiUrl}/${endpoint}?per_page=100&page=${page}${params ? separator + params : ""}`;
+    logger.log(`  Fetching ${endpoint} page ${page}/${totalPages}...`);
+    const result = await fetchJSON<T[]>(fetchImpl, url);
+    all.push(...result.data);
+    totalPages = result.totalPages;
+    page += 1;
+    await delay(DELAY_MS);
+  } while (page <= totalPages);
+
+  return all;
+}
+
+async function exportTaxonomies(
+  config: ResolvedConfig,
+  fetchImpl: typeof fetch,
+  logger: Logger,
+): Promise<{ categoryMap: Map<number, string>; tagMap: Map<number, string> }> {
+  logger.log("Phase 1: Loading taxonomies...");
+
+  const categories = await fetchAllPages<WPTerm>(fetchImpl, config.wpApiUrl, "categories", logger);
+  const tags = await fetchAllPages<WPTerm>(fetchImpl, config.wpApiUrl, "tags", logger);
+
+  return {
+    categoryMap: new Map(categories.map((category) => [category.id, category.name])),
+    tagMap: new Map(tags.map((tag) => [tag.id, tag.name])),
+  };
 }
 
 async function exportPosts(
+  config: ResolvedConfig,
+  fetchImpl: typeof fetch,
+  logger: Logger,
+  stateFile: string,
   categoryMap: Map<number, string>,
   tagMap: Map<number, string>,
   state: ExportState,
+  result: ExportResult,
 ): Promise<void> {
-  console.log("Phase 2: Exporting blog posts...");
+  logger.log("Phase 2: Exporting blog posts...");
 
   let page = state.lastPage > 0 ? state.lastPage : 1;
-  let totalPages = 1;
-  let exported = state.postsExported;
+  const firstUrl = `${config.wpApiUrl}/posts?per_page=100&page=${page}&orderby=date&order=asc`;
+  const firstPage = await fetchJSON<WPPost[]>(fetchImpl, firstUrl);
+  state.totalPosts = firstPage.total;
+  logger.log(`  Total posts: ${firstPage.total} (${firstPage.totalPages} pages)`);
 
-  // First request to get totals
-  const firstUrl = `${WP_API}/posts?per_page=100&page=${page}&orderby=date&order=asc`;
-  const first = await fetchJSON<WPPost[]>(firstUrl);
-  totalPages = first.totalPages;
-  state.totalPosts = first.total;
-  console.log(`  Total posts: ${first.total} (${totalPages} pages)`);
-
-  // Process first page
-  for (const post of first.data) {
-    const md = htmlToMarkdown(post.content.rendered);
-    const fm = generateFrontmatter(post, categoryMap, tagMap);
-    writePost(post, md, fm);
-    exported++;
+  for (const post of firstPage.data) {
+    const filePath = writePost(
+      config,
+      post,
+      htmlToMarkdown(post.content.rendered),
+      generateFrontmatter(post, categoryMap, tagMap),
+    );
+    result.outputPaths.posts.push(filePath);
+    state.postsExported += 1;
   }
 
   state.lastPage = page;
-  state.postsExported = exported;
-  saveState(state);
-  console.log(`  Exported ${exported}/${state.totalPosts} posts`);
+  saveState(stateFile, state);
+  page += 1;
 
-  page++;
-
-  // Remaining pages
-  while (page <= totalPages) {
+  while (page <= firstPage.totalPages) {
     await delay(DELAY_MS);
-    const url = `${WP_API}/posts?per_page=100&page=${page}&orderby=date&order=asc`;
-    console.log(
-      `  Page ${page}/${totalPages} (${exported} exported so far)...`,
-    );
+    const url = `${config.wpApiUrl}/posts?per_page=100&page=${page}&orderby=date&order=asc`;
+    logger.log(`  Page ${page}/${firstPage.totalPages} (${state.postsExported} exported so far)...`);
+    const pageResult = await fetchJSON<WPPost[]>(fetchImpl, url);
 
-    try {
-      const result = await fetchJSON<WPPost[]>(url);
-      for (const post of result.data) {
-        const md = htmlToMarkdown(post.content.rendered);
-        const fm = generateFrontmatter(post, categoryMap, tagMap);
-        writePost(post, md, fm);
-        exported++;
-      }
-    } catch (err) {
-      console.error(`  Error on page ${page}:`, err);
-      state.lastPage = page;
-      state.postsExported = exported;
-      saveState(state);
-      console.log(`  State saved. Resume from page ${page}.`);
-      throw err;
+    for (const post of pageResult.data) {
+      const filePath = writePost(
+        config,
+        post,
+        htmlToMarkdown(post.content.rendered),
+        generateFrontmatter(post, categoryMap, tagMap),
+      );
+      result.outputPaths.posts.push(filePath);
+      state.postsExported += 1;
     }
 
     state.lastPage = page;
-    state.postsExported = exported;
-    saveState(state);
-    page++;
+    saveState(stateFile, state);
+    page += 1;
   }
 
-  console.log(`  Done! Exported ${exported} posts.`);
+  logger.log(`  Done! Exported ${state.postsExported} posts.`);
 }
 
 async function exportCustomPostType(
+  config: ResolvedConfig,
+  fetchImpl: typeof fetch,
+  logger: Logger,
   type: string,
   section: string,
   categoryMap: Map<number, string>,
   tagMap: Map<number, string>,
+  result: ExportResult,
 ): Promise<number> {
-  console.log(`  Exporting custom post type: ${type} -> ${section}/`);
+  logger.log(`  Exporting custom post type: ${type} -> ${section}/`);
 
   try {
-    const posts = await fetchAllPages<WPPost>(type);
-    let count = 0;
+    const posts = await fetchAllPages<WPPost>(fetchImpl, config.wpApiUrl, type, logger);
     for (const post of posts) {
-      const md = htmlToMarkdown(post.content.rendered);
-      const fm = generateFrontmatter(post, categoryMap, tagMap);
-      writePost(post, md, fm, section);
-      count++;
+      const filePath = writePost(
+        config,
+        post,
+        htmlToMarkdown(post.content.rendered),
+        generateFrontmatter(post, categoryMap, tagMap),
+        section,
+      );
+      result.outputPaths.customPostTypes.push(filePath);
     }
-    console.log(`  Exported ${count} ${type} items`);
-    return count;
-  } catch (err) {
-    console.warn(
-      `  Warning: Could not export ${type} (may not be exposed via REST API):`,
-      err,
-    );
+    logger.log(`  Exported ${posts.length} ${type} items`);
+    return posts.length;
+  } catch (error) {
+    logger.warn(`  Warning: Could not export ${type} (may not be exposed via REST API):`, error);
     return 0;
   }
 }
 
-async function main(): Promise<void> {
-  console.log("=== WordPress to Hugo Export ===\n");
+function writePage(config: ResolvedConfig, page: WPPost, markdown: string): string {
+  const pageRoute = resolvePageRoute(config, page.link);
+  const filePath = path.join(config.contentDir, ...pageRoute.pathSegments);
+  let frontmatter =
+    `---\ntitle: ${escapeYamlString(page.title.rendered)}\ndate: ${page.date}\n`;
+  if (pageRoute.slug) {
+    frontmatter += `slug: "${pageRoute.slug}"\n`;
+  }
+  frontmatter += 'layout: "page"\n---\n';
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${frontmatter}\n${markdown}`);
+  return filePath;
+}
 
-  const state = loadState();
-  console.log(`Resuming from state: ${JSON.stringify(state)}\n`);
-
-  // Phase 1: Taxonomies
-  const { categoryMap, tagMap } = await exportTaxonomies();
-  state.categoriesLoaded = true;
-  state.tagsLoaded = true;
-  saveState(state);
-
-  // Phase 2: Blog posts
-  if (state.phase !== "posts_done") {
-    await exportPosts(categoryMap, tagMap, state);
-    state.phase = "posts_done";
-    saveState(state);
+function resolvePageRoute(
+  config: ResolvedConfig,
+  pageUrl: string,
+): { pathSegments: string[]; slug?: string } {
+  const relativePath = normalizeSiteRelativePath(pageUrl, config.siteUrl);
+  if (!relativePath) {
+    throw new Error(`Page URL does not match siteUrl base path: ${pageUrl}`);
   }
 
-  // Phase 3: Custom post types
-  console.log("\nPhase 3: Exporting custom post types...");
+  const trimmedPath = relativePath.replace(/^\/+|\/+$/g, "");
+  if (!trimmedPath) {
+    return { pathSegments: ["_index.md"] };
+  }
 
-  const customTypes = config.customPostTypes;
+  const segments = trimmedPath.split("/");
+  const slug = segments[segments.length - 1];
+  segments[segments.length - 1] = `${slug}.md`;
+  return { pathSegments: segments, slug };
+}
 
-  for (const { type, section } of customTypes) {
+export async function runExport(
+  config: ResolvedConfig,
+  options: ExportOptions = {},
+): Promise<ExportResult> {
+  const fetchImpl = options.fetch || fetch;
+  const logger = options.logger || console;
+  const stateFile = options.stateFile || path.resolve(process.cwd(), ".export-state.json");
+  const state = loadState(stateFile);
+  const result: ExportResult = {
+    state,
+    outputPaths: {
+      posts: [],
+      customPostTypes: [],
+      pages: [],
+    },
+  };
+
+  logger.log("=== WordPress to Hugo Export ===\n");
+  logger.log(`Resuming from state: ${JSON.stringify(state)}\n`);
+
+  const { categoryMap, tagMap } = await exportTaxonomies(config, fetchImpl, logger);
+  state.categoriesLoaded = true;
+  state.tagsLoaded = true;
+  saveState(stateFile, state);
+
+  if (state.phase !== "posts_done") {
+    await exportPosts(config, fetchImpl, logger, stateFile, categoryMap, tagMap, state, result);
+    state.phase = "posts_done";
+    saveState(stateFile, state);
+  }
+
+  logger.log("\nPhase 3: Exporting custom post types...");
+  for (const { type, section } of config.customPostTypes) {
     if (!state.customTypesExported.includes(type)) {
-      await exportCustomPostType(type, section, categoryMap, tagMap);
+      await exportCustomPostType(config, fetchImpl, logger, type, section, categoryMap, tagMap, result);
       state.customTypesExported.push(type);
-      saveState(state);
+      saveState(stateFile, state);
     }
   }
 
-  // Phase 4: Static pages
-  console.log("\nPhase 4: Exporting static pages...");
-  const pages = await fetchAllPages<WPPost>("pages");
+  logger.log("\nPhase 4: Exporting static pages...");
+  const pages = await fetchAllPages<WPPost>(fetchImpl, config.wpApiUrl, "pages", logger);
   for (const page of pages) {
-    const md = htmlToMarkdown(page.content.rendered);
-    // Static pages go to content root
-    const filePath = path.join(CONTENT_DIR, `${page.slug}.md`);
-    const fm = `---\ntitle: ${escapeYamlString(page.title.rendered)}\ndate: ${page.date}\nslug: "${page.slug}"\nlayout: "page"\n---\n`;
-    fs.writeFileSync(filePath, fm + "\n" + md);
-    console.log(`  Exported page: ${page.slug}`);
+    const filePath = writePage(config, page, htmlToMarkdown(page.content.rendered));
+    result.outputPaths.pages.push(filePath);
+    logger.log(`  Exported page: ${page.slug}`);
   }
 
   state.phase = "complete";
-  saveState(state);
+  saveState(stateFile, state);
 
-  console.log("\n=== Export complete! ===");
-  console.log(`Posts: ${state.postsExported}`);
-  console.log(`Custom types: ${state.customTypesExported.join(", ")}`);
-  console.log(`Pages: ${pages.length}`);
+  logger.log("\n=== Export complete! ===");
+  logger.log(`Posts: ${state.postsExported}`);
+  logger.log(`Custom types: ${state.customTypesExported.join(", ")}`);
+  logger.log(`Pages: ${pages.length}`);
+
+  return result;
 }
 
-main().catch(console.error);
+async function main(): Promise<void> {
+  await runExport(loadConfig());
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
