@@ -1,185 +1,155 @@
-// wp-verify.ts
-// Verify WordPress sitemap against Hugo content
 import fs from "node:fs";
 import path from "node:path";
-import { loadConfig } from "./config";
+import { pathToFileURL } from "node:url";
 
-const config = loadConfig();
+import { loadConfig, type ResolvedConfig } from "./config";
+import { normalizeHugoPostPath, normalizeWordPressPostUrl } from "./routing";
 
-const CONTENT_DIR = config.contentDir;
-const ARCHIVES_DIR = path.join(CONTENT_DIR, "archives");
+interface Logger {
+  log: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+}
+
+export interface VerificationOptions {
+  fetch?: typeof fetch;
+  logger?: Logger;
+}
+
+interface TargetReport {
+  wordpress: Set<string>;
+  hugo: Set<string>;
+  matched: number;
+  missing: string[];
+  extra: string[];
+}
+
+export interface VerificationResult {
+  perfect: boolean;
+  targets: {
+    posts: TargetReport;
+  };
+}
+
 const DELAY_MS = 100;
-const SITEMAP_BASE = config.siteUrl;
 
-// --- Utilities ---
-
-function delay(ms: number): Promise<void> {
+async function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// --- Sitemap Fetching ---
-
-async function fetchSitemapXml(url: string): Promise<string> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} fetching ${url}`);
+async function fetchSitemapXml(fetchImpl: typeof fetch, url: string): Promise<string> {
+  const response = await fetchImpl(url);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} fetching ${url}`);
   }
-  return res.text();
+  return response.text();
 }
 
-// --- URL Extraction ---
-
-function extractArchiveUrls(xml: string): string[] {
+function extractLocs(xml: string): string[] {
   const locRegex = /<loc>(.*?)<\/loc>/g;
   const urls: string[] = [];
   let match: RegExpExecArray | null;
+
   while ((match = locRegex.exec(xml)) !== null) {
-    const url = match[1];
-    // Only keep /archives/ URLs (skip pages, custom post types, etc.)
-    if (/\/archives\/\d{4}\/\d{2}\//.test(url)) {
-      urls.push(url);
-    }
+    urls.push(match[1]);
   }
+
   return urls;
 }
 
-// --- URL Normalization ---
-
-function urlToKey(url: string): string {
-  // Strip protocol and domain
-  let urlPath = url
-    .replace(new RegExp(`^https?://(?:www\\.)?${config.domainRegex}`), "")
-    .replace(/\/$/, ""); // strip trailing slash
-
-  // Extract YYYY/MM/slug from /archives/YYYY/MM/slug
-  const match = urlPath.match(/\/archives\/(\d{4}\/\d{2}\/.+)$/);
-  if (!match) return "";
-
-  return decodeURIComponent(match[1]).toLowerCase();
-}
-
-// --- Fetch All WordPress URLs ---
-
-async function fetchAllWordPressUrls(): Promise<Set<string>> {
+async function fetchAllWordPressUrls(
+  config: ResolvedConfig,
+  fetchImpl: typeof fetch,
+  logger: Logger,
+): Promise<Set<string>> {
   const keys = new Set<string>();
+  const mainUrl = `${config.siteUrl}/sitemap.xml`;
+  logger.log(`  Fetching ${mainUrl}...`);
 
-  // Fetch the main sitemap (could be a sitemap index or a regular sitemap)
-  const mainUrl = `${SITEMAP_BASE}/sitemap.xml`;
-  console.log(`  Fetching ${mainUrl}...`);
+  const mainXml = await fetchSitemapXml(fetchImpl, mainUrl);
+  if (mainXml.includes("<sitemapindex")) {
+    const childUrls = extractLocs(mainXml);
+    logger.log(`  Found sitemap index with ${childUrls.length} child sitemaps`);
 
-  try {
-    const mainXml = await fetchSitemapXml(mainUrl);
-
-    if (mainXml.includes("<sitemapindex")) {
-      // It's a sitemap index — extract child sitemap URLs
-      const locRegex = /<loc>(.*?)<\/loc>/g;
-      const childUrls: string[] = [];
-      let match: RegExpExecArray | null;
-      while ((match = locRegex.exec(mainXml)) !== null) {
-        childUrls.push(match[1]);
-      }
-      console.log(`  Found sitemap index with ${childUrls.length} child sitemaps`);
-
-      for (const childUrl of childUrls) {
-        try {
-          const childXml = await fetchSitemapXml(childUrl);
-          const urls = extractArchiveUrls(childXml);
-          let added = 0;
-          for (const u of urls) {
-            const key = urlToKey(u);
-            if (key) { keys.add(key); added++; }
+    for (const childUrl of childUrls) {
+      try {
+        const childXml = await fetchSitemapXml(fetchImpl, childUrl);
+        let added = 0;
+        for (const url of extractLocs(childXml)) {
+          const key = normalizeWordPressPostUrl(url, config.postRoute.urlPath);
+          if (key) {
+            keys.add(key);
+            added += 1;
           }
-          const filename = childUrl.split("/").pop() || childUrl;
-          console.log(`  ${filename}: ${added} archive URLs`);
-          await delay(DELAY_MS);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(`  ✗ ${childUrl}: ${msg}`);
         }
+        logger.log(`  ${childUrl.split("/").pop() || childUrl}: ${added} matching URLs`);
+        await delay(DELAY_MS);
+      } catch (error) {
+        logger.error(`  ✗ ${childUrl}: ${error instanceof Error ? error.message : String(error)}`);
       }
-    } else {
-      // It's a regular sitemap — extract URLs directly
-      const urls = extractArchiveUrls(mainXml);
-      for (const u of urls) {
-        const key = urlToKey(u);
-        if (key) keys.add(key);
-      }
-      console.log(`  Found ${keys.size} archive URLs in sitemap`);
     }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`  ✗ Failed to fetch sitemap: ${msg}`);
+    return keys;
   }
 
+  for (const url of extractLocs(mainXml)) {
+    const key = normalizeWordPressPostUrl(url, config.postRoute.urlPath);
+    if (key) {
+      keys.add(key);
+    }
+  }
+  logger.log(`  Found ${keys.size} matching URLs in sitemap`);
   return keys;
 }
 
-// --- Hugo Content Walking ---
+function walkIndexFiles(dir: string): string[] {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
 
-function walkHugoArchives(): string[] {
   const files: string[] = [];
 
-  function walk(dir: string): void {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+  function walk(currentDir: string): void {
+    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
     for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
+      const fullPath = path.join(currentDir, entry.name);
       if (entry.isDirectory()) {
         walk(fullPath);
       } else if (entry.name === "index.md") {
         files.push(fullPath);
       }
-      // Skip _index.md (section indexes)
     }
   }
 
-  walk(ARCHIVES_DIR);
+  walk(dir);
   return files;
 }
 
-function hugoPathToKey(filePath: string): string {
-  // filePath: .../content/archives/YYYY/MM/slug/index.md
-  // key: YYYY/MM/slug
-  const rel = path.relative(ARCHIVES_DIR, filePath);
-  // rel = YYYY/MM/slug/index.md → strip /index.md
-  const key = rel.replace(/\/index\.md$/, "").toLowerCase();
-  // Decode percent-encoded directory names (e.g., %e2%80%99 → ')
-  try {
-    return decodeURIComponent(key);
-  } catch {
-    return key; // If decoding fails, use as-is
-  }
-}
-
-function buildHugoKeySet(): Set<string> {
-  const files = walkHugoArchives();
+function buildHugoKeySet(config: ResolvedConfig): Set<string> {
   const keys = new Set<string>();
-  for (const file of files) {
-    const key = hugoPathToKey(file);
-    if (key) keys.add(key);
+  for (const filePath of walkIndexFiles(config.contentDir)) {
+    const key = normalizeHugoPostPath(filePath, config.contentDir, config.postRoute);
+    if (key) {
+      keys.add(key);
+    }
   }
   return keys;
 }
 
-// --- Comparison & Report ---
-
-function compareAndReport(
-  wpKeys: Set<string>,
-  hugoKeys: Set<string>,
-): boolean {
-  const missing: string[] = []; // in WP but not Hugo
-  const extra: string[] = []; // in Hugo but not WP
+function buildTargetReport(wordpress: Set<string>, hugo: Set<string>): TargetReport {
+  const missing: string[] = [];
+  const extra: string[] = [];
   let matched = 0;
 
-  for (const key of wpKeys) {
-    if (hugoKeys.has(key)) {
-      matched++;
+  for (const key of wordpress) {
+    if (hugo.has(key)) {
+      matched += 1;
     } else {
       missing.push(key);
     }
   }
 
-  for (const key of hugoKeys) {
-    if (!wpKeys.has(key)) {
+  for (const key of hugo) {
+    if (!wordpress.has(key)) {
       extra.push(key);
     }
   }
@@ -187,63 +157,85 @@ function compareAndReport(
   missing.sort();
   extra.sort();
 
-  const total = wpKeys.size;
-  const matchRate =
-    total > 0 ? ((matched / total) * 100).toFixed(2) : "0.00";
-
-  console.log("\n=== Verification Report ===");
-  console.log(`WordPress posts: ${wpKeys.size}`);
-  console.log(`Hugo posts:      ${hugoKeys.size}`);
-  console.log(`Matched:         ${matched}`);
-  console.log(`Missing (WP→Hugo): ${missing.length}`);
-  console.log(`Extra (Hugo only):  ${extra.length}`);
-  console.log(`Match rate:      ${matchRate}%`);
-
-  if (missing.length > 0) {
-    console.log("\n=== Missing Posts (in WordPress but not Hugo) ===");
-    for (const key of missing) {
-      console.log(`  ${config.siteUrl}/archives/${key}/`);
-    }
-  }
-
-  if (extra.length > 0) {
-    console.log("\n=== Extra Posts (in Hugo but not WordPress) ===");
-    for (const key of extra) {
-      console.log(`  content/archives/${key}/index.md`);
-    }
-  }
-
-  const perfect = missing.length === 0;
-  if (perfect) {
-    console.log("\n✓ All WordPress posts have corresponding Hugo content!");
-  } else {
-    console.log(
-      `\n✗ ${missing.length} WordPress post(s) missing from Hugo content.`,
-    );
-  }
-
-  return perfect;
+  return {
+    wordpress,
+    hugo,
+    matched,
+    missing,
+    extra,
+  };
 }
 
-// --- Main ---
+function printReport(config: ResolvedConfig, report: TargetReport, logger: Logger): boolean {
+  const total = report.wordpress.size;
+  const matchRate = total > 0 ? ((report.matched / total) * 100).toFixed(2) : "0.00";
+
+  logger.log("\n=== Verification Report ===");
+  logger.log(`WordPress posts: ${report.wordpress.size}`);
+  logger.log(`Hugo posts:      ${report.hugo.size}`);
+  logger.log(`Matched:         ${report.matched}`);
+  logger.log(`Missing (WP→Hugo): ${report.missing.length}`);
+  logger.log(`Extra (Hugo only):  ${report.extra.length}`);
+  logger.log(`Match rate:      ${matchRate}%`);
+
+  if (report.missing.length > 0) {
+    logger.log("\n=== Missing Posts (in WordPress but not Hugo) ===");
+    for (const key of report.missing) {
+      logger.log(`  ${config.siteUrl}/${key}/`);
+    }
+  }
+
+  if (report.extra.length > 0) {
+    logger.log("\n=== Extra Posts (in Hugo but not WordPress) ===");
+    for (const key of report.extra) {
+      logger.log(`  ${key}`);
+    }
+  }
+
+  if (report.missing.length === 0) {
+    logger.log("\n✓ All WordPress posts have corresponding Hugo content!");
+    return true;
+  }
+
+  logger.log(`\n✗ ${report.missing.length} WordPress post(s) missing from Hugo content.`);
+  return false;
+}
+
+export async function runVerification(
+  config: ResolvedConfig,
+  options: VerificationOptions = {},
+): Promise<VerificationResult> {
+  const fetchImpl = options.fetch || fetch;
+  const logger = options.logger || console;
+
+  logger.log("=== WordPress ↔ Hugo Verification ===\n");
+  logger.log("Phase 1: Fetching WordPress sitemaps...");
+  const wordpressPosts = await fetchAllWordPressUrls(config, fetchImpl, logger);
+  logger.log(`  Total unique matching URLs: ${wordpressPosts.size}\n`);
+
+  logger.log("Phase 2: Walking Hugo content...");
+  const hugoPosts = buildHugoKeySet(config);
+  logger.log(`  Total Hugo posts for configured route: ${hugoPosts.size}`);
+
+  const postsReport = buildTargetReport(wordpressPosts, hugoPosts);
+  const perfect = printReport(config, postsReport, logger);
+
+  return {
+    perfect,
+    targets: {
+      posts: postsReport,
+    },
+  };
+}
 
 async function main(): Promise<void> {
-  console.log("=== WordPress ↔ Hugo Verification ===\n");
-
-  // Phase 1: Fetch WordPress sitemap URLs
-  console.log("Phase 1: Fetching WordPress sitemaps...");
-  const wpKeys = await fetchAllWordPressUrls();
-  console.log(`  Total unique archive URLs: ${wpKeys.size}\n`);
-
-  // Phase 2: Walk Hugo content
-  console.log("Phase 2: Walking Hugo archives...");
-  const hugoKeys = buildHugoKeySet();
-  console.log(`  Total Hugo archive posts: ${hugoKeys.size}`);
-
-  // Phase 3: Compare
-  const perfect = compareAndReport(wpKeys, hugoKeys);
-
-  process.exit(perfect ? 0 : 1);
+  const result = await runVerification(loadConfig());
+  process.exit(result.perfect ? 0 : 1);
 }
 
-main().catch(console.error);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

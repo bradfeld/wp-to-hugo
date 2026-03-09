@@ -1,16 +1,23 @@
-// config.ts — Shared configuration for all wp-to-hugo scripts
 import fs from "node:fs";
 import path from "node:path";
 
-// --- Types ---
+import { assertSupportedRoutePattern } from "./routing";
+
+export interface RoutePatternConfig {
+  contentPath: string;
+  urlPath: string;
+}
 
 interface WpToHugoConfig {
   siteUrl: string;
   contentDir?: string;
+  postRoute?: Partial<RoutePatternConfig>;
   customPostTypes?: Array<{ type: string; section: string }>;
 }
 
 export interface ResolvedConfig {
+  configPath: string;
+  configDir: string;
   siteUrl: string;
   contentDir: string;
   staticImagesDir: string;
@@ -18,63 +25,74 @@ export interface ResolvedConfig {
   domain: string;
   domainRegex: string;
   mediaUrlRegex: RegExp;
+  postRoute: RoutePatternConfig;
   customPostTypes: Array<{ type: string; section: string }>;
 }
 
-// --- Loader ---
+const DEFAULT_POST_ROUTE: RoutePatternConfig = {
+  contentPath: "archives/:year/:month/:slug",
+  urlPath: "/archives/:year/:month/:slug/",
+};
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function loadConfig(): ResolvedConfig {
-  const configPath = path.resolve(__dirname, "wp-config.json");
+function resolveConfigPath(configPath?: string): string {
+  if (configPath) {
+    return path.resolve(configPath);
+  }
+  if (process.env.WP_TO_HUGO_CONFIG) {
+    return path.resolve(process.env.WP_TO_HUGO_CONFIG);
+  }
+  return path.resolve(process.cwd(), "wp-config.json");
+}
 
-  if (!fs.existsSync(configPath)) {
+export function loadConfig(configPath?: string): ResolvedConfig {
+  const resolvedConfigPath = resolveConfigPath(configPath);
+
+  if (!fs.existsSync(resolvedConfigPath)) {
     console.error(
       "Error: wp-config.json not found.\n" +
       "Copy wp-config.example.json to wp-config.json and edit it with your site details.\n" +
-      `Expected at: ${configPath}`
+      `Expected at: ${resolvedConfigPath}`,
     );
     process.exit(1);
   }
 
-  const raw = JSON.parse(fs.readFileSync(configPath, "utf-8")) as WpToHugoConfig;
+  const raw = JSON.parse(fs.readFileSync(resolvedConfigPath, "utf-8")) as WpToHugoConfig;
 
   if (!raw.siteUrl) {
     console.error("Error: siteUrl is required in wp-config.json");
     process.exit(1);
   }
 
-  // Strip trailing slash from siteUrl
+  const configDir = path.dirname(resolvedConfigPath);
   const siteUrl = raw.siteUrl.replace(/\/+$/, "");
-
-  // Extract domain (strip protocol)
   const domain = siteUrl.replace(/^https?:\/\//, "");
   const domainRegex = escapeRegex(domain);
-
-  // Content directory (resolve relative to config file location)
-  const contentDir = path.resolve(
-    path.dirname(configPath),
-    raw.contentDir || "./content"
-  );
-
+  const contentDir = path.resolve(configDir, raw.contentDir || "./content");
+  const contentDirInput = raw.contentDir || "./content";
   const staticImagesDir = path.resolve(
-    path.dirname(configPath),
-    raw.contentDir ? path.join(path.dirname(raw.contentDir), "static/images") : "./static/images"
+    configDir,
+    path.join(path.dirname(contentDirInput), "static/images"),
   );
+  const postRoute: RoutePatternConfig = {
+    contentPath: raw.postRoute?.contentPath || DEFAULT_POST_ROUTE.contentPath,
+    urlPath: raw.postRoute?.urlPath || DEFAULT_POST_ROUTE.urlPath,
+  };
 
-  // Build media URL regex that matches all WordPress CDN URL variants:
-  //   https://i0.wp.com/{domain}/wp-content/uploads/...
-  //   https://i0.wp.com/www.{domain}/wp-content/uploads/...
-  //   https://{domain}/wp-content/uploads/...
-  //   https://www.{domain}/wp-content/uploads/...
+  assertSupportedRoutePattern(postRoute.contentPath, "postRoute.contentPath");
+  assertSupportedRoutePattern(postRoute.urlPath, "postRoute.urlPath");
+
   const mediaUrlRegex = new RegExp(
     `https?:\\/\\/(?:i\\d\\.wp\\.com\\/)?(?:www\\.)?${domainRegex}\\/wp-content\\/uploads\\/[^\\s)"']+`,
-    "g"
+    "g",
   );
 
   return {
+    configPath: resolvedConfigPath,
+    configDir,
     siteUrl,
     contentDir,
     staticImagesDir,
@@ -82,6 +100,7 @@ export function loadConfig(): ResolvedConfig {
     domain,
     domainRegex,
     mediaUrlRegex,
+    postRoute,
     customPostTypes: raw.customPostTypes || [],
   };
 }
