@@ -279,6 +279,27 @@ It can also write a stable JSON data file for Hugo usage, using the configured `
 
 If `/users` is unavailable, export continues successfully with a warning and skips author enrichment for that run. If a post references an author ID that is missing from an otherwise successful users response, the exporter omits the field and warns once per missing ID.
 
+### Content transforms
+
+Every markdown-writing export path now runs through one shared writer:
+
+- posts from `wp-export.ts`
+- pages from `wp-export.ts`
+- custom post types exported inside `wp-export.ts`
+- custom post types exported by `export-custom-types.ts`
+
+The writer pipeline is:
+
+1. Convert HTML to Markdown
+2. Apply the optional transform from `contentTransform`
+3. Write the final markdown file
+
+`contentTransform.module` is resolved relative to `wp-config.json`. By default the loader calls the module's `default` export, but you can override that with `contentTransform.exportName`.
+
+The transform receives `(markdown, context)` where `context.kind` is `post`, `page`, or `custom-post-type`, and `context.slug` identifies the item being written. This makes it safe to target specific cleanup rules without forking the exporter.
+
+If the configured export is not a function, or the transform throws, export fails with a descriptive error that includes the content kind and slug.
+
 ### What "100%" means
 
 A 100% match rate means every URL in the WordPress sitemap has a corresponding Hugo content file. This is the target before switching DNS.

@@ -2,8 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import TurndownService from "turndown";
-
 import {
   appendAuthorFrontMatter,
   loadAuthorExportState,
@@ -12,6 +10,7 @@ import {
   type AuthorExportState,
 } from "./authors";
 import { loadConfig, type ResolvedConfig } from "./config";
+import { decodeHtmlEntities, escapeYamlString, writeMarkdownContent } from "./export-content";
 import { buildPostRoutePlan, normalizeSiteRelativePath } from "./routing";
 
 interface WPPost {
@@ -57,6 +56,7 @@ export interface ExportOptions {
   fetch?: typeof fetch;
   logger?: Logger;
   stateFile?: string;
+  writerRecorder?: (callsite: string) => void;
 }
 
 export interface ExportResult {
@@ -86,83 +86,6 @@ function createInitialState(): ExportState {
 
 async function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function createTurndown(): TurndownService {
-  const td = new TurndownService({
-    headingStyle: "atx",
-    codeBlockStyle: "fenced",
-    bulletListMarker: "-",
-    emDelimiter: "*",
-  });
-
-  td.addRule("wpBlockComments", {
-    filter: (node) => node.nodeType === 8,
-    replacement: () => "",
-  });
-
-  td.addRule("wpCaption", {
-    filter: (node) => {
-      const element = node as HTMLElement;
-      return element.classList?.contains("wp-caption") || false;
-    },
-    replacement: (_content, node) => {
-      const element = node as HTMLElement;
-      const image = element.querySelector("img");
-      const caption = element.querySelector(".wp-caption-text");
-      if (!image) {
-        return "";
-      }
-      const alt = caption?.textContent || image.alt || "";
-      return `\n\n![${alt}](${image.src})\n\n`;
-    },
-  });
-
-  return td;
-}
-
-function htmlToMarkdown(html: string): string {
-  let cleaned = html.replace(/<!--\s*\/?wp:\w+[^>]*-->/g, "");
-  cleaned = cleaned.replace(/<p>\s*<\/p>/g, "");
-  cleaned = cleaned.replace(/\[caption[^\]]*\](.*?)\[\/caption\]/gs, "$1");
-
-  const td = createTurndown();
-  let markdown = td.turndown(cleaned);
-  markdown = markdown.replace(/\n{3,}/g, "\n\n");
-  return markdown.trim();
-}
-
-function decodeHtmlEntities(text: string): string {
-  const entityMap: Record<string, string> = {
-    "&amp;": "&",
-    "&lt;": "<",
-    "&gt;": ">",
-    "&quot;": '"',
-    "&apos;": "'",
-    "&hellip;": "...",
-    "&ndash;": "\u2013",
-    "&mdash;": "\u2014",
-    "&lsquo;": "\u2018",
-    "&rsquo;": "\u2019",
-    "&ldquo;": "\u201C",
-    "&rdquo;": "\u201D",
-    "&nbsp;": " ",
-    "&copy;": "\u00A9",
-  };
-  let result = text;
-  for (const [entity, char] of Object.entries(entityMap)) {
-    result = result.replaceAll(entity, char);
-  }
-  result = result.replace(/&#(\d+);/g, (_match, numeric) => String.fromCharCode(parseInt(numeric, 10)));
-  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_match, hex) => String.fromCharCode(parseInt(hex, 16)));
-  return result;
-}
-
-function escapeYamlString(value: string): string {
-  if (/[:"'\[\]{}#&*!|>%@`]/.test(value) || value.includes("\n")) {
-    return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-  }
-  return `"${value}"`;
 }
 
 function generateFrontmatter(
@@ -201,27 +124,38 @@ function generateFrontmatter(
     : frontmatter;
 }
 
-function writeBundle(filePath: string, frontmatter: string, markdown: string): string {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${frontmatter}\n${markdown}`);
-  return filePath;
-}
-
-function writePost(
+async function writePost(
   config: ResolvedConfig,
   post: WPPost,
-  markdown: string,
+  html: string,
   frontmatter: string,
+  writerRecorder: ((callsite: string) => void) | undefined,
   section = "archives",
-): string {
+): Promise<string> {
   if (section !== "archives") {
     const filePath = path.join(config.contentDir, section, post.slug, "index.md");
-    return writeBundle(filePath, frontmatter, markdown);
+    return writeMarkdownContent({
+      config,
+      filePath,
+      frontMatter: frontmatter,
+      html,
+      context: { kind: "custom-post-type", slug: post.slug, sourceUrl: post.link },
+      callsite: "wp-export.ts:custom-post-type",
+      writerRecorder,
+    });
   }
 
   const routePlan = buildPostRoutePlan(post, config.postRoute);
   const filePath = path.join(config.contentDir, ...routePlan.indexFile.split("/"));
-  return writeBundle(filePath, frontmatter, markdown);
+  return writeMarkdownContent({
+    config,
+    filePath,
+    frontMatter: frontmatter,
+    html,
+    context: { kind: "post", slug: post.slug, sourceUrl: post.link },
+    callsite: "wp-export.ts:post",
+    writerRecorder,
+  });
 }
 
 function loadState(stateFile: string): ExportState {
@@ -300,6 +234,7 @@ async function exportPosts(
   state: ExportState,
   result: ExportResult,
   authorState: AuthorExportState,
+  writerRecorder: ((callsite: string) => void) | undefined,
 ): Promise<void> {
   logger.log("Phase 2: Exporting blog posts...");
   const missingAuthorIds = new Set<number>();
@@ -311,10 +246,10 @@ async function exportPosts(
   logger.log(`  Total posts: ${firstPage.total} (${firstPage.totalPages} pages)`);
 
   for (const post of firstPage.data) {
-    const filePath = writePost(
+    const filePath = await writePost(
       config,
       post,
-      htmlToMarkdown(post.content.rendered),
+      post.content.rendered,
       generateFrontmatter(
         post,
         categoryMap,
@@ -322,6 +257,7 @@ async function exportPosts(
         resolveAuthorSlug(post, authorState, missingAuthorIds, logger, result),
         config,
       ),
+      writerRecorder,
     );
     result.outputPaths.posts.push(filePath);
     state.postsExported += 1;
@@ -338,10 +274,10 @@ async function exportPosts(
     const pageResult = await fetchJSON<WPPost[]>(fetchImpl, url);
 
     for (const post of pageResult.data) {
-      const filePath = writePost(
+      const filePath = await writePost(
         config,
         post,
-        htmlToMarkdown(post.content.rendered),
+        post.content.rendered,
         generateFrontmatter(
           post,
           categoryMap,
@@ -349,6 +285,7 @@ async function exportPosts(
           resolveAuthorSlug(post, authorState, missingAuthorIds, logger, result),
           config,
         ),
+        writerRecorder,
       );
       result.outputPaths.posts.push(filePath);
       state.postsExported += 1;
@@ -372,6 +309,7 @@ async function exportCustomPostType(
   tagMap: Map<number, string>,
   result: ExportResult,
   authorState: AuthorExportState,
+  writerRecorder: ((callsite: string) => void) | undefined,
 ): Promise<number> {
   logger.log(`  Exporting custom post type: ${type} -> ${section}/`);
   const missingAuthorIds = new Set<number>();
@@ -379,10 +317,10 @@ async function exportCustomPostType(
   try {
     const posts = await fetchAllPages<WPPost>(fetchImpl, config.wpApiUrl, type, logger);
     for (const post of posts) {
-      const filePath = writePost(
+      const filePath = await writePost(
         config,
         post,
-        htmlToMarkdown(post.content.rendered),
+        post.content.rendered,
         generateFrontmatter(
           post,
           categoryMap,
@@ -390,6 +328,7 @@ async function exportCustomPostType(
           resolveAuthorSlug(post, authorState, missingAuthorIds, logger, result),
           config,
         ),
+        writerRecorder,
         section,
       );
       result.outputPaths.customPostTypes.push(filePath);
@@ -402,18 +341,28 @@ async function exportCustomPostType(
   }
 }
 
-function writePage(config: ResolvedConfig, page: WPPost, markdown: string): string {
+async function writePage(
+  config: ResolvedConfig,
+  page: WPPost,
+  writerRecorder: ((callsite: string) => void) | undefined,
+): Promise<string> {
   const pageRoute = resolvePageRoute(config, page.link);
   const filePath = path.join(config.contentDir, ...pageRoute.pathSegments);
   let frontmatter =
-    `---\ntitle: ${escapeYamlString(page.title.rendered)}\ndate: ${page.date}\n`;
+    `---\ntitle: ${escapeYamlString(decodeHtmlEntities(page.title.rendered))}\ndate: ${page.date}\n`;
   if (pageRoute.slug) {
     frontmatter += `slug: "${pageRoute.slug}"\n`;
   }
   frontmatter += 'layout: "page"\n---\n';
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${frontmatter}\n${markdown}`);
-  return filePath;
+  return writeMarkdownContent({
+    config,
+    filePath,
+    frontMatter: frontmatter,
+    html: page.content.rendered,
+    context: { kind: "page", slug: page.slug, sourceUrl: page.link },
+    callsite: "wp-export.ts:page",
+    writerRecorder,
+  });
 }
 
 function resolvePageRoute(
@@ -480,6 +429,7 @@ export async function runExport(
       posts: [],
       customPostTypes: [],
       pages: [],
+      authorData: undefined,
     },
   };
 
@@ -496,7 +446,18 @@ export async function runExport(
   saveState(stateFile, state);
 
   if (state.phase !== "posts_done") {
-    await exportPosts(config, fetchImpl, logger, stateFile, categoryMap, tagMap, state, result, authorState);
+    await exportPosts(
+      config,
+      fetchImpl,
+      logger,
+      stateFile,
+      categoryMap,
+      tagMap,
+      state,
+      result,
+      authorState,
+      options.writerRecorder,
+    );
     state.phase = "posts_done";
     saveState(stateFile, state);
   }
@@ -504,7 +465,18 @@ export async function runExport(
   logger.log("\nPhase 3: Exporting custom post types...");
   for (const { type, section } of config.customPostTypes) {
     if (!state.customTypesExported.includes(type)) {
-      await exportCustomPostType(config, fetchImpl, logger, type, section, categoryMap, tagMap, result, authorState);
+      await exportCustomPostType(
+        config,
+        fetchImpl,
+        logger,
+        type,
+        section,
+        categoryMap,
+        tagMap,
+        result,
+        authorState,
+        options.writerRecorder,
+      );
       state.customTypesExported.push(type);
       saveState(stateFile, state);
     }
@@ -513,7 +485,7 @@ export async function runExport(
   logger.log("\nPhase 4: Exporting static pages...");
   const pages = await fetchAllPages<WPPost>(fetchImpl, config.wpApiUrl, "pages", logger);
   for (const page of pages) {
-    const filePath = writePage(config, page, htmlToMarkdown(page.content.rendered));
+    const filePath = await writePage(config, page, options.writerRecorder);
     result.outputPaths.pages.push(filePath);
     logger.log(`  Exported page: ${page.slug}`);
   }

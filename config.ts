@@ -29,6 +29,11 @@ export interface AuthorExportConfig {
   dataFile: string;
 }
 
+export interface ContentTransformConfig {
+  modulePath: string;
+  exportName?: string;
+}
+
 interface WpToHugoConfig {
   siteUrl: string;
   contentDir?: string;
@@ -44,6 +49,10 @@ interface WpToHugoConfig {
     enabled?: boolean;
     frontMatterField?: string;
     dataFile?: string;
+  };
+  contentTransform?: {
+    module?: string;
+    exportName?: string;
   };
   customPostTypes?: Array<{ type: string; section: string }>;
 }
@@ -61,6 +70,7 @@ export interface ResolvedConfig {
   postRoute: RoutePatternConfig;
   verification: VerificationConfig;
   authorExport: AuthorExportConfig;
+  contentTransform?: ContentTransformConfig;
   customPostTypes: Array<{ type: string; section: string }>;
 }
 
@@ -188,6 +198,12 @@ export function loadConfig(configPath?: string): ResolvedConfig {
     frontMatterField: raw.authorExport?.frontMatterField || DEFAULT_AUTHOR_EXPORT.frontMatterField,
     dataFile: path.resolve(configDir, raw.authorExport?.dataFile || DEFAULT_AUTHOR_EXPORT.dataFile),
   };
+  const contentTransform = raw.contentTransform?.module
+    ? {
+        modulePath: path.resolve(configDir, raw.contentTransform.module),
+        exportName: raw.contentTransform.exportName,
+      }
+    : undefined;
 
   assertSupportedRoutePattern(postRoute.contentPath, "postRoute.contentPath");
   assertSupportedRoutePattern(postRoute.urlPath, "postRoute.urlPath");
@@ -213,6 +229,7 @@ export function loadConfig(configPath?: string): ResolvedConfig {
     postRoute,
     verification,
     authorExport,
+    contentTransform,
     customPostTypes: raw.customPostTypes || [],
   };
 }

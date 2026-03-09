@@ -17,6 +17,9 @@
     "frontMatterField": "author",
     "dataFile": "data/authors.json"
   },
+  "contentTransform": {
+    "module": "./transforms/sample-transform.js"
+  },
   "customPostTypes": [
     { "type": "book", "section": "books" },
     { "type": "portfolio", "section": "portfolio" }

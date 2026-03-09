@@ -70,6 +70,9 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
     "frontMatterField": "author",
     "dataFile": "data/authors.json"
   },
+  "contentTransform": {
+    "module": "./transforms/sample-transform.js"
+  },
   "customPostTypes": [
     { "type": "book", "section": "books" },
     { "type": "portfolio", "section": "portfolio" }
@@ -91,6 +94,8 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
 | `authorExport.enabled` | No | `false` | Enables optional author enrichment during export |
 | `authorExport.frontMatterField` | No | `author` | Front matter field written when an author slug is resolved |
 | `authorExport.dataFile` | No | `data/authors.json` | Optional authors data file path, resolved relative to `wp-config.json` |
+| `contentTransform.module` | No | — | Path to a post-export markdown transform module, resolved relative to `wp-config.json` |
+| `contentTransform.exportName` | No | `default` | Named export to call from the transform module |
 | `customPostTypes` | No | `[]` | WordPress custom post type endpoints and their Hugo content directories |
 
 ### Post Routes
@@ -186,6 +191,36 @@ Author enrichment is off by default. When you enable `authorExport`, the exporte
 ```
 
 If the WordPress `/users` endpoint is unavailable, export continues with a warning and author fields are omitted for that run. If specific author IDs are missing from an otherwise successful users response, those posts omit the field and the exporter warns once per missing ID.
+
+### Content Transforms
+
+`contentTransform` lets you apply site-specific markdown cleanup after HTML-to-Markdown conversion and before any markdown file is written.
+
+```json
+{
+  "contentTransform": {
+    "module": "./transforms/sample-transform.js",
+    "exportName": "default"
+  }
+}
+```
+
+Supported transform signature:
+
+```ts
+export default async function transform(markdown, context) {
+  return markdown;
+}
+```
+
+`context.kind` is one of `post`, `page`, or `custom-post-type`, and `context.slug` identifies the item being written. The hook runs for:
+
+- posts from `npm run export`
+- pages from `npm run export`
+- custom post types exported inside `npm run export`
+- custom post types exported by `npm run export-custom`
+
+If the module export is not a function, or the transform throws, the export fails loudly with the content kind and slug in the error.
 
 ### Custom Post Types
 
