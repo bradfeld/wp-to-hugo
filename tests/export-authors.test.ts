@@ -85,6 +85,9 @@ test("author export warns and continues when /users is unavailable", async () =>
   const post = makeFixturePost({ author: 12 });
   const category = makeFixtureCategory();
   const tag = makeFixtureTag();
+  const staleAuthorDataFile = path.join(projectDir, "data", "authors.json");
+  fs.mkdirSync(path.dirname(staleAuthorDataFile), { recursive: true });
+  fs.writeFileSync(staleAuthorDataFile, JSON.stringify([{ slug: "stale-author" }], null, 2));
 
   const fetchMock: typeof fetch = async (input) => {
     const url = String(input);
