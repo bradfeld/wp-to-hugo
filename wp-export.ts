@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import TurndownService from "turndown";
 
 import { loadConfig, type ResolvedConfig } from "./config";
-import { buildPostRoutePlan } from "./routing";
+import { buildPostRoutePlan, normalizeSiteRelativePath } from "./routing";
 
 interface WPPost {
   id: number;
@@ -367,12 +367,37 @@ async function exportCustomPostType(
 }
 
 function writePage(config: ResolvedConfig, page: WPPost, markdown: string): string {
-  const filePath = path.join(config.contentDir, `${page.slug}.md`);
-  const frontmatter =
-    `---\ntitle: ${escapeYamlString(page.title.rendered)}\ndate: ${page.date}\nslug: "${page.slug}"\nlayout: "page"\n---\n`;
+  const pageRoute = resolvePageRoute(config, page.link);
+  const filePath = path.join(config.contentDir, ...pageRoute.pathSegments);
+  let frontmatter =
+    `---\ntitle: ${escapeYamlString(page.title.rendered)}\ndate: ${page.date}\n`;
+  if (pageRoute.slug) {
+    frontmatter += `slug: "${pageRoute.slug}"\n`;
+  }
+  frontmatter += 'layout: "page"\n---\n';
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${frontmatter}\n${markdown}`);
   return filePath;
+}
+
+function resolvePageRoute(
+  config: ResolvedConfig,
+  pageUrl: string,
+): { pathSegments: string[]; slug?: string } {
+  const relativePath = normalizeSiteRelativePath(pageUrl, config.siteUrl);
+  if (!relativePath) {
+    throw new Error(`Page URL does not match siteUrl base path: ${pageUrl}`);
+  }
+
+  const trimmedPath = relativePath.replace(/^\/+|\/+$/g, "");
+  if (!trimmedPath) {
+    return { pathSegments: ["_index.md"] };
+  }
+
+  const segments = trimmedPath.split("/");
+  const slug = segments[segments.length - 1];
+  segments[segments.length - 1] = `${slug}.md`;
+  return { pathSegments: segments, slug };
 }
 
 export async function runExport(

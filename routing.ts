@@ -44,12 +44,48 @@ function normalizeKey(pathname: string): string {
   return decodeURIComponent(trimmed).toLowerCase();
 }
 
+function normalizePathname(pathname: string): string {
+  return pathname.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+}
+
+function normalizedHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^www\./, "");
+}
+
+function normalizedPort(url: URL): string {
+  if (url.port) {
+    return url.port;
+  }
+
+  if (url.protocol === "http:") {
+    return "80";
+  }
+
+  if (url.protocol === "https:") {
+    return "443";
+  }
+
+  return "";
+}
+
+function siteOriginMatches(candidateUrl: URL, site: URL): boolean {
+  return (
+    candidateUrl.protocol === site.protocol &&
+    normalizedPort(candidateUrl) === normalizedPort(site) &&
+    normalizedHostname(candidateUrl.hostname) === normalizedHostname(site.hostname)
+  );
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function extractRouteTokens(pattern: string): string[] {
   return pattern.match(/:[a-zA-Z]+/g) || [];
+}
+
+export function getRouteTokens(pattern: string): string[] {
+  return [...new Set(extractRouteTokens(pattern))];
 }
 
 function buildRouteTokens(post: PostRouteInput): RouteTokens {
@@ -116,6 +152,27 @@ export function assertSupportedRoutePattern(pattern: string, fieldName: string):
   }
 }
 
+export function assertCompatibleRoutePatterns(
+  contentPath: string,
+  urlPath: string,
+): void {
+  const contentTokens = new Set(getRouteTokens(contentPath));
+  const missingTokens = getRouteTokens(urlPath).filter((token) => !contentTokens.has(token));
+
+  if (missingTokens.length > 0) {
+    throw new Error(
+      `postRoute.urlPath uses tokens not present in postRoute.contentPath: ${missingTokens.join(", ")}`,
+    );
+  }
+}
+
+export function assertUniqueRoutePattern(pattern: string, fieldName: string): void {
+  const tokens = new Set(getRouteTokens(pattern));
+  if (!tokens.has(":slug") && !tokens.has(":id")) {
+    throw new Error(`${fieldName} must include at least one unique token (:slug or :id)`);
+  }
+}
+
 export function buildPostRoutePlan(
   post: PostRouteInput,
   route: { contentPath: string; urlPath: string },
@@ -133,8 +190,34 @@ export function buildPostRoutePlan(
   };
 }
 
-export function normalizeWordPressPostUrl(url: string, urlPath: string): string {
-  const pathname = new URL(url).pathname;
+export function normalizeSiteRelativePath(url: string, siteUrl: string): string {
+  const candidateUrl = new URL(url);
+  const site = new URL(siteUrl);
+
+  if (!siteOriginMatches(candidateUrl, site)) {
+    return "";
+  }
+
+  const sitePath = normalizePathname(site.pathname).replace(/\/+$/g, "") || "/";
+  const pathname = normalizePathname(candidateUrl.pathname);
+
+  if (sitePath === "/") {
+    return pathname;
+  }
+
+  if (pathname === sitePath) {
+    return "/";
+  }
+
+  if (pathname.startsWith(`${sitePath}/`)) {
+    return pathname.slice(sitePath.length) || "/";
+  }
+
+  return "";
+}
+
+export function normalizeWordPressPostUrl(url: string, urlPath: string, siteUrl?: string): string {
+  const pathname = siteUrl ? normalizeSiteRelativePath(url, siteUrl) : new URL(url).pathname;
   if (!matchPattern(urlPath, pathname, true)) {
     return "";
   }

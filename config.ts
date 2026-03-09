@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertSupportedRoutePattern } from "./routing";
+import {
+  assertCompatibleRoutePatterns,
+  assertSupportedRoutePattern,
+  assertUniqueRoutePattern,
+} from "./routing";
 
 export interface RoutePatternConfig {
   contentPath: string;
@@ -84,6 +88,9 @@ export function loadConfig(configPath?: string): ResolvedConfig {
 
   assertSupportedRoutePattern(postRoute.contentPath, "postRoute.contentPath");
   assertSupportedRoutePattern(postRoute.urlPath, "postRoute.urlPath");
+  assertCompatibleRoutePatterns(postRoute.contentPath, postRoute.urlPath);
+  assertUniqueRoutePattern(postRoute.contentPath, "postRoute.contentPath");
+  assertUniqueRoutePattern(postRoute.urlPath, "postRoute.urlPath");
 
   const mediaUrlRegex = new RegExp(
     `https?:\\/\\/(?:i\\d\\.wp\\.com\\/)?(?:www\\.)?${domainRegex}\\/wp-content\\/uploads\\/[^\\s)"']+`,
