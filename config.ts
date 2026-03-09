@@ -12,7 +12,7 @@ export interface RoutePatternConfig {
   urlPath: string;
 }
 
-export type VerificationTarget = "posts" | "pages" | "categories";
+export type VerificationTarget = "posts" | "pages" | "categories" | "authors";
 export type VerificationSource = "content" | "public";
 
 export interface VerificationConfig {
@@ -20,6 +20,13 @@ export interface VerificationConfig {
   sources: VerificationSource[];
   publicDir: string;
   categoryBasePath: string;
+  authorBasePath: string;
+}
+
+export interface AuthorExportConfig {
+  enabled: boolean;
+  frontMatterField: string;
+  dataFile: string;
 }
 
 interface WpToHugoConfig {
@@ -31,6 +38,12 @@ interface WpToHugoConfig {
     sources?: VerificationSource[];
     publicDir?: string;
     categoryBasePath?: string;
+    authorBasePath?: string;
+  };
+  authorExport?: {
+    enabled?: boolean;
+    frontMatterField?: string;
+    dataFile?: string;
   };
   customPostTypes?: Array<{ type: string; section: string }>;
 }
@@ -47,6 +60,7 @@ export interface ResolvedConfig {
   mediaUrlRegex: RegExp;
   postRoute: RoutePatternConfig;
   verification: VerificationConfig;
+  authorExport: AuthorExportConfig;
   customPostTypes: Array<{ type: string; section: string }>;
 }
 
@@ -60,12 +74,20 @@ const DEFAULT_VERIFICATION = {
   sources: ["content"] as VerificationSource[],
   publicDir: "./public",
   categoryBasePath: "/category/",
+  authorBasePath: "/author/",
+};
+
+const DEFAULT_AUTHOR_EXPORT = {
+  enabled: false,
+  frontMatterField: "author",
+  dataFile: "data/authors.json",
 };
 
 const ALLOWED_VERIFICATION_TARGETS = new Set<VerificationTarget>([
   "posts",
   "pages",
   "categories",
+  "authors",
 ]);
 
 const ALLOWED_VERIFICATION_SOURCES = new Set<VerificationSource>([
@@ -159,6 +181,12 @@ export function loadConfig(configPath?: string): ResolvedConfig {
     sources: raw.verification?.sources || DEFAULT_VERIFICATION.sources,
     publicDir: path.resolve(configDir, raw.verification?.publicDir || DEFAULT_VERIFICATION.publicDir),
     categoryBasePath: raw.verification?.categoryBasePath || DEFAULT_VERIFICATION.categoryBasePath,
+    authorBasePath: raw.verification?.authorBasePath || DEFAULT_VERIFICATION.authorBasePath,
+  };
+  const authorExport: AuthorExportConfig = {
+    enabled: raw.authorExport?.enabled ?? DEFAULT_AUTHOR_EXPORT.enabled,
+    frontMatterField: raw.authorExport?.frontMatterField || DEFAULT_AUTHOR_EXPORT.frontMatterField,
+    dataFile: path.resolve(configDir, raw.authorExport?.dataFile || DEFAULT_AUTHOR_EXPORT.dataFile),
   };
 
   assertSupportedRoutePattern(postRoute.contentPath, "postRoute.contentPath");
@@ -184,6 +212,7 @@ export function loadConfig(configPath?: string): ResolvedConfig {
     mediaUrlRegex,
     postRoute,
     verification,
+    authorExport,
     customPostTypes: raw.customPostTypes || [],
   };
 }

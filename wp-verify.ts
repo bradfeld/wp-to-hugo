@@ -63,6 +63,7 @@ function emptyWordPressMatches(): VerificationKeySets {
     posts: new Set<string>(),
     pages: new Set<string>(),
     categories: new Set<string>(),
+    authors: new Set<string>(),
   };
 }
 
@@ -133,6 +134,11 @@ function renderPublicUrl(config: ResolvedConfig, target: VerificationTarget, key
   if (target === "categories") {
     const categoryBase = config.verification.categoryBasePath.replace(/^\/+|\/+$/g, "");
     return `${config.siteUrl}/${categoryBase}/${key}/`;
+  }
+
+  if (target === "authors") {
+    const authorBase = config.verification.authorBasePath.replace(/^\/+|\/+$/g, "");
+    return `${config.siteUrl}/${authorBase}/${key}/`;
   }
 
   return `${config.siteUrl}/${key}/`;
@@ -230,12 +236,14 @@ export async function runVerification(
   logger.log(`  Posts: ${discovered.posts.size}`);
   logger.log(`  Pages: ${discovered.pages.size}`);
   logger.log(`  Categories: ${discovered.categories.size}`);
+  logger.log(`  Authors: ${discovered.authors.size}`);
 
   const { wordpressMatches, ambiguities } = classifyAgainstDiscovered(sitemapUrls, config, discovered);
   const targets = {
     posts: buildTargetReport(wordpressMatches.posts, discovered.posts),
     pages: buildTargetReport(wordpressMatches.pages, discovered.pages),
     categories: buildTargetReport(wordpressMatches.categories, discovered.categories),
+    authors: buildTargetReport(wordpressMatches.authors, discovered.authors),
   };
 
   for (const target of config.verification.targets) {

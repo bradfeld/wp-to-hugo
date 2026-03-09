@@ -44,6 +44,7 @@ function pageKeyFromPathname(pathname: string): string {
 function getReservedPageBasePaths(config: ResolvedConfig): string[] {
   return [
     normalizeBasePath(config.verification.categoryBasePath),
+    normalizeBasePath(config.verification.authorBasePath),
     ...config.customPostTypes.map(({ section }) => normalizeBasePath(section)),
   ];
 }
@@ -51,7 +52,7 @@ function getReservedPageBasePaths(config: ResolvedConfig): string[] {
 function isReservedPageContentPath(relativePath: string, config: ResolvedConfig): boolean {
   const normalizedPath = relativePath.replace(/\\/g, "/");
 
-  if (normalizedPath.startsWith("categories/")) {
+  if (normalizedPath.startsWith("categories/") || normalizedPath.startsWith("authors/")) {
     return true;
   }
 
@@ -109,6 +110,7 @@ function emptyKeySets(): VerificationKeySets {
     posts: new Set<string>(),
     pages: new Set<string>(),
     categories: new Set<string>(),
+    authors: new Set<string>(),
   };
 }
 
@@ -149,6 +151,7 @@ export function classifySitemapUrlCandidates(
   const targets = new Set(config.verification.targets);
   const reservedBasePaths = getReservedPageBasePaths(config);
   const categoryBasePath = normalizeBasePath(config.verification.categoryBasePath);
+  const authorBasePath = normalizeBasePath(config.verification.authorBasePath);
   const postKey = normalizeWordPressPostUrl(url, config.postRoute.urlPath, config.siteUrl);
 
   if (targets.has("posts")) {
@@ -162,6 +165,14 @@ export function classifySitemapUrlCandidates(
     const key = normalizeKey(remainder);
     if (key) {
       matches.push({ target: "categories", key });
+    }
+  }
+
+  if (targets.has("authors") && pathname.startsWith(authorBasePath)) {
+    const remainder = pathname.slice(authorBasePath.length);
+    const key = normalizeKey(remainder);
+    if (key && !key.includes("/")) {
+      matches.push({ target: "authors", key });
     }
   }
 
@@ -208,7 +219,7 @@ export function contentPathToKey(
         ? ""
         : relativePath.endsWith("/index.md")
           ? normalizeKey(relativePath.replace(/\/index\.md$/i, ""))
-          : normalizeKey(relativePath.replace(/\.md$/i, "")),
+        : normalizeKey(relativePath.replace(/\.md$/i, "")),
     };
   }
 
@@ -220,6 +231,17 @@ export function contentPathToKey(
     return {
       target: "categories",
       key: normalizeKey(relativePath.replace(/^categories\//i, "").replace(/\/_index\.md$/i, "")),
+    };
+  }
+
+  if (
+    config.verification.targets.includes("authors") &&
+    normalizedPath.endsWith("/_index.md") &&
+    /^authors\/[^/]+\/_index\.md$/i.test(relativePath)
+  ) {
+    return {
+      target: "authors",
+      key: normalizeKey(relativePath.replace(/^authors\//i, "").replace(/\/_index\.md$/i, "")),
     };
   }
 
@@ -244,8 +266,9 @@ export function publicPathToMatches(
   }
 
   const routePath = `/${relativePath.replace(/\/index\.html$/i, "")}/`;
-  const reservedBasePaths = getReservedPageBasePaths(config);
   const categoryBasePath = normalizeBasePath(config.verification.categoryBasePath);
+  const authorBasePath = normalizeBasePath(config.verification.authorBasePath);
+  const reservedBasePaths = getReservedPageBasePaths(config);
   const postKey = normalizeWordPressPostUrl(`https://example.com${routePath}`, config.postRoute.urlPath);
   const matches: VerificationMatch[] = [];
 
@@ -260,8 +283,21 @@ export function publicPathToMatches(
     }
   }
 
-  if (config.verification.targets.includes("posts") && postKey) {
-    matches.push({ target: "posts", key: postKey });
+  if (
+    config.verification.targets.includes("authors") &&
+    routePath.startsWith(authorBasePath)
+  ) {
+    const remainder = routePath.slice(authorBasePath.length);
+    const key = normalizeKey(remainder);
+    if (key && !key.includes("/")) {
+      matches.push({ target: "authors", key });
+    }
+  }
+
+  if (config.verification.targets.includes("posts")) {
+    if (postKey) {
+      matches.push({ target: "posts", key: postKey });
+    }
   }
 
   if (

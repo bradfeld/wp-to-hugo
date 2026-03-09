@@ -240,6 +240,7 @@ Verification now supports:
 - posts
 - pages
 - categories
+- authors
 
 The default config remains backward compatible:
 
@@ -249,7 +250,8 @@ The default config remains backward compatible:
     "targets": ["posts"],
     "sources": ["content"],
     "publicDir": "./public",
-    "categoryBasePath": "/category/"
+    "categoryBasePath": "/category/",
+    "authorBasePath": "/author/"
   }
 }
 ```
@@ -259,7 +261,7 @@ When you expand `verification.targets`, the verifier classifies sitemap URLs int
 Discovery sources:
 
 - `content`: scans route-owning markdown files such as `content/about.md` and `content/categories/essays/_index.md`
-- `public`: scans built output such as `public/about/index.html` and `public/category/essays/index.html`
+- `public`: scans built output such as `public/about/index.html`, `public/category/essays/index.html`, and `public/author/jane-doe/index.html`
 
 If you enable both, the discovered route keys are unioned before comparison.
 
@@ -268,6 +270,14 @@ If you enable both, the discovered route keys are unioned before comparison.
 Some sites use overlapping route spaces, especially slug-only posts and root-level pages. In that case the verifier keeps multiple candidates for a sitemap URL and resolves them against the discovered Hugo outputs instead of assuming a target up front.
 
 If more than one candidate remains plausible after discovery, the verifier reports that URL in a separate ambiguity section instead of silently counting it as matched or missing.
+
+### Author export
+
+Author export is optional and off by default. When enabled, the exporter fetches `/wp-json/wp/v2/users`, builds an `id -> slug` map, and appends the configured front matter field to posts when a matching user exists.
+
+It can also write a stable JSON data file for Hugo usage, using the configured `authorExport.dataFile` path. The file contents are sorted by slug so reruns remain deterministic.
+
+If `/users` is unavailable, export continues successfully with a warning and skips author enrichment for that run. If a post references an author ID that is missing from an otherwise successful users response, the exporter omits the field and warns once per missing ID.
 
 ### What "100%" means
 

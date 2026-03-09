@@ -62,7 +62,13 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
     "targets": ["posts"],
     "sources": ["content"],
     "publicDir": "./public",
-    "categoryBasePath": "/category/"
+    "categoryBasePath": "/category/",
+    "authorBasePath": "/author/"
+  },
+  "authorExport": {
+    "enabled": false,
+    "frontMatterField": "author",
+    "dataFile": "data/authors.json"
   },
   "customPostTypes": [
     { "type": "book", "section": "books" },
@@ -81,6 +87,10 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
 | `verification.sources` | No | `["content"]` | Where to discover Hugo routes: `content`, `public`, or both |
 | `verification.publicDir` | No | `./public` | Built Hugo output directory, resolved relative to `wp-config.json` |
 | `verification.categoryBasePath` | No | `/category/` | Base path used for category archive URLs |
+| `verification.authorBasePath` | No | `/author/` | Base path used for author archive URLs |
+| `authorExport.enabled` | No | `false` | Enables optional author enrichment during export |
+| `authorExport.frontMatterField` | No | `author` | Front matter field written when an author slug is resolved |
+| `authorExport.dataFile` | No | `data/authors.json` | Optional authors data file path, resolved relative to `wp-config.json` |
 | `customPostTypes` | No | `[]` | WordPress custom post type endpoints and their Hugo content directories |
 
 ### Post Routes
@@ -135,6 +145,7 @@ Available targets:
 - `"posts"`
 - `"pages"`
 - `"categories"`
+- `"authors"`
 
 Available discovery sources:
 
@@ -148,15 +159,33 @@ Example multi-target configuration:
 ```json
 {
   "verification": {
-    "targets": ["posts", "pages", "categories"],
+    "targets": ["posts", "pages", "categories", "authors"],
     "sources": ["content", "public"],
     "publicDir": "./public",
-    "categoryBasePath": "/category/"
+    "categoryBasePath": "/category/",
+    "authorBasePath": "/author/"
   }
 }
 ```
 
 For category verification from content, the expected route-owning file is `content/categories/<slug>/_index.md`. For public discovery, the expected built path is `public/category/<slug>/index.html`.
+For author verification from content, the expected route-owning file is `content/authors/<slug>/_index.md`. For public discovery, the expected built path is `public/author/<slug>/index.html`.
+
+### Author Export
+
+Author enrichment is off by default. When you enable `authorExport`, the exporter fetches `/wp-json/wp/v2/users`, maps WordPress author IDs to slugs, and writes the configured front matter field on exported posts.
+
+```json
+{
+  "authorExport": {
+    "enabled": true,
+    "frontMatterField": "author",
+    "dataFile": "data/authors.json"
+  }
+}
+```
+
+If the WordPress `/users` endpoint is unavailable, export continues with a warning and author fields are omitted for that run. If specific author IDs are missing from an otherwise successful users response, those posts omit the field and the exporter warns once per missing ID.
 
 ### Custom Post Types
 

@@ -9,7 +9,13 @@
     "targets": ["posts"],
     "sources": ["content"],
     "publicDir": "./public",
-    "categoryBasePath": "/category/"
+    "categoryBasePath": "/category/",
+    "authorBasePath": "/author/"
+  },
+  "authorExport": {
+    "enabled": false,
+    "frontMatterField": "author",
+    "dataFile": "data/authors.json"
   },
   "customPostTypes": [
     { "type": "book", "section": "books" },

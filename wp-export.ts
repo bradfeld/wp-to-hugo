@@ -4,6 +4,13 @@ import { pathToFileURL } from "node:url";
 
 import TurndownService from "turndown";
 
+import {
+  appendAuthorFrontMatter,
+  loadAuthorExportState,
+  removeAuthorDataFile,
+  writeAuthorDataFile,
+  type AuthorExportState,
+} from "./authors";
 import { loadConfig, type ResolvedConfig } from "./config";
 import { buildPostRoutePlan, normalizeSiteRelativePath } from "./routing";
 
@@ -17,6 +24,7 @@ interface WPPost {
   excerpt: { rendered: string };
   categories: number[];
   tags: number[];
+  author?: number;
   featured_media: number;
   link: string;
 }
@@ -53,10 +61,12 @@ export interface ExportOptions {
 
 export interface ExportResult {
   state: ExportState;
+  warnings: string[];
   outputPaths: {
     posts: string[];
     customPostTypes: string[];
     pages: string[];
+    authorData?: string;
   };
 }
 
@@ -159,6 +169,8 @@ function generateFrontmatter(
   post: WPPost,
   categoryMap: Map<number, string>,
   tagMap: Map<number, string>,
+  authorSlug?: string,
+  config?: ResolvedConfig,
 ): string {
   const categories = post.categories.map((id) => categoryMap.get(id)).filter(Boolean);
   const tags = post.tags.map((id) => tagMap.get(id)).filter(Boolean);
@@ -184,7 +196,9 @@ function generateFrontmatter(
   frontmatter += "draft: false\n";
   frontmatter += "---\n";
 
-  return frontmatter;
+  return config
+    ? appendAuthorFrontMatter(frontmatter, authorSlug, config.authorExport)
+    : frontmatter;
 }
 
 function writeBundle(filePath: string, frontmatter: string, markdown: string): string {
@@ -285,8 +299,10 @@ async function exportPosts(
   tagMap: Map<number, string>,
   state: ExportState,
   result: ExportResult,
+  authorState: AuthorExportState,
 ): Promise<void> {
   logger.log("Phase 2: Exporting blog posts...");
+  const missingAuthorIds = new Set<number>();
 
   let page = state.lastPage > 0 ? state.lastPage : 1;
   const firstUrl = `${config.wpApiUrl}/posts?per_page=100&page=${page}&orderby=date&order=asc`;
@@ -299,7 +315,13 @@ async function exportPosts(
       config,
       post,
       htmlToMarkdown(post.content.rendered),
-      generateFrontmatter(post, categoryMap, tagMap),
+      generateFrontmatter(
+        post,
+        categoryMap,
+        tagMap,
+        resolveAuthorSlug(post, authorState, missingAuthorIds, logger, result),
+        config,
+      ),
     );
     result.outputPaths.posts.push(filePath);
     state.postsExported += 1;
@@ -320,7 +342,13 @@ async function exportPosts(
         config,
         post,
         htmlToMarkdown(post.content.rendered),
-        generateFrontmatter(post, categoryMap, tagMap),
+        generateFrontmatter(
+          post,
+          categoryMap,
+          tagMap,
+          resolveAuthorSlug(post, authorState, missingAuthorIds, logger, result),
+          config,
+        ),
       );
       result.outputPaths.posts.push(filePath);
       state.postsExported += 1;
@@ -343,8 +371,10 @@ async function exportCustomPostType(
   categoryMap: Map<number, string>,
   tagMap: Map<number, string>,
   result: ExportResult,
+  authorState: AuthorExportState,
 ): Promise<number> {
   logger.log(`  Exporting custom post type: ${type} -> ${section}/`);
+  const missingAuthorIds = new Set<number>();
 
   try {
     const posts = await fetchAllPages<WPPost>(fetchImpl, config.wpApiUrl, type, logger);
@@ -353,7 +383,13 @@ async function exportCustomPostType(
         config,
         post,
         htmlToMarkdown(post.content.rendered),
-        generateFrontmatter(post, categoryMap, tagMap),
+        generateFrontmatter(
+          post,
+          categoryMap,
+          tagMap,
+          resolveAuthorSlug(post, authorState, missingAuthorIds, logger, result),
+          config,
+        ),
         section,
       );
       result.outputPaths.customPostTypes.push(filePath);
@@ -400,6 +436,35 @@ function resolvePageRoute(
   return { pathSegments: segments, slug };
 }
 
+function addWarning(result: ExportResult, logger: Logger, message: string): void {
+  result.warnings.push(message);
+  logger.warn(message);
+}
+
+function resolveAuthorSlug(
+  post: WPPost,
+  authorState: AuthorExportState,
+  missingAuthorIds: Set<number>,
+  logger: Logger,
+  result: ExportResult,
+): string | undefined {
+  if (!authorState.enabledForRun || !post.author) {
+    return undefined;
+  }
+
+  const author = authorState.authorMap.get(post.author);
+  if (author) {
+    return author.slug;
+  }
+
+  if (!missingAuthorIds.has(post.author)) {
+    missingAuthorIds.add(post.author);
+    addWarning(result, logger, `Missing author mapping for WordPress author ID ${post.author}`);
+  }
+
+  return undefined;
+}
+
 export async function runExport(
   config: ResolvedConfig,
   options: ExportOptions = {},
@@ -410,6 +475,7 @@ export async function runExport(
   const state = loadState(stateFile);
   const result: ExportResult = {
     state,
+    warnings: [],
     outputPaths: {
       posts: [],
       customPostTypes: [],
@@ -420,13 +486,17 @@ export async function runExport(
   logger.log("=== WordPress to Hugo Export ===\n");
   logger.log(`Resuming from state: ${JSON.stringify(state)}\n`);
 
+  const authorState = await loadAuthorExportState(config, fetchImpl, (message) => addWarning(result, logger, message));
+  if (config.authorExport.enabled && !authorState.enabledForRun) {
+    removeAuthorDataFile(config.authorExport.dataFile);
+  }
   const { categoryMap, tagMap } = await exportTaxonomies(config, fetchImpl, logger);
   state.categoriesLoaded = true;
   state.tagsLoaded = true;
   saveState(stateFile, state);
 
   if (state.phase !== "posts_done") {
-    await exportPosts(config, fetchImpl, logger, stateFile, categoryMap, tagMap, state, result);
+    await exportPosts(config, fetchImpl, logger, stateFile, categoryMap, tagMap, state, result, authorState);
     state.phase = "posts_done";
     saveState(stateFile, state);
   }
@@ -434,7 +504,7 @@ export async function runExport(
   logger.log("\nPhase 3: Exporting custom post types...");
   for (const { type, section } of config.customPostTypes) {
     if (!state.customTypesExported.includes(type)) {
-      await exportCustomPostType(config, fetchImpl, logger, type, section, categoryMap, tagMap, result);
+      await exportCustomPostType(config, fetchImpl, logger, type, section, categoryMap, tagMap, result, authorState);
       state.customTypesExported.push(type);
       saveState(stateFile, state);
     }
@@ -450,6 +520,11 @@ export async function runExport(
 
   state.phase = "complete";
   saveState(stateFile, state);
+
+  if (authorState.enabledForRun) {
+    writeAuthorDataFile(config.authorExport.dataFile, authorState.authorMap);
+    result.outputPaths.authorData = config.authorExport.dataFile;
+  }
 
   logger.log("\n=== Export complete! ===");
   logger.log(`Posts: ${state.postsExported}`);
