@@ -6,7 +6,11 @@ import {
   type VerificationSource,
   type VerificationTarget,
 } from "./config";
-import { normalizeHugoPostPath, normalizeWordPressPostUrl } from "./routing";
+import {
+  normalizeHugoPostPath,
+  normalizeSiteRelativePath,
+  normalizeWordPressPostUrl,
+} from "./routing";
 
 export interface VerificationMatch {
   target: VerificationTarget;
@@ -19,18 +23,62 @@ function normalizeKey(value: string): string {
   return decodeURIComponent(value.replace(/^\/+|\/+$/g, "")).toLowerCase();
 }
 
-function normalizePathname(url: string): string {
-  return new URL(url).pathname.replace(/\/{2,}/g, "/");
-}
-
 function normalizeBasePath(basePath: string): string {
   const trimmed = basePath.replace(/^\/+|\/+$/g, "");
   return trimmed ? `/${trimmed}/` : "/";
 }
 
+function isRootPath(pathname: string): boolean {
+  return pathname === "/";
+}
+
 function isSingleSegment(pathname: string): boolean {
   const segments = pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
   return segments.length === 1;
+}
+
+function pageKeyFromPathname(pathname: string): string {
+  return normalizeKey(pathname);
+}
+
+function getReservedPageBasePaths(config: ResolvedConfig): string[] {
+  return [
+    normalizeBasePath(config.verification.categoryBasePath),
+    ...config.customPostTypes.map(({ section }) => normalizeBasePath(section)),
+  ];
+}
+
+function isReservedPageContentPath(relativePath: string, config: ResolvedConfig): boolean {
+  const normalizedPath = relativePath.replace(/\\/g, "/");
+
+  if (normalizedPath.startsWith("categories/")) {
+    return true;
+  }
+
+  return config.customPostTypes.some(({ section }) => {
+    const normalizedSection = section.replace(/^\/+|\/+$/g, "");
+    return (
+      normalizedPath === `${normalizedSection}.md` ||
+      normalizedPath === `${normalizedSection}/_index.md` ||
+      normalizedPath.startsWith(`${normalizedSection}/`)
+    );
+  });
+}
+
+function shouldTreatAsPagePath(
+  pathname: string,
+  postKey: string,
+  reservedBasePaths: string[],
+): boolean {
+  if (reservedBasePaths.some((basePath) => pathname.startsWith(basePath))) {
+    return false;
+  }
+
+  if (isRootPath(pathname) || isSingleSegment(pathname)) {
+    return true;
+  }
+
+  return postKey === "";
 }
 
 function walkFiles(rootDir: string, predicate: (filePath: string) => boolean): string[] {
@@ -70,6 +118,12 @@ function addMatch(match: VerificationMatch | null, discovered: VerificationKeySe
   }
 }
 
+function addMatches(matches: VerificationMatch[], discovered: VerificationKeySets): void {
+  for (const match of matches) {
+    discovered[match.target].add(match.key);
+  }
+}
+
 export function extractSitemapLocs(xml: string): string[] {
   const locRegex = /<loc>(.*?)<\/loc>/g;
   const urls: string[] = [];
@@ -86,28 +140,36 @@ export function classifySitemapUrlCandidates(
   url: string,
   config: ResolvedConfig,
 ): VerificationMatch[] {
-  const pathname = normalizePathname(url);
+  const pathname = normalizeSiteRelativePath(url, config.siteUrl);
+  if (!pathname) {
+    return [];
+  }
+
   const matches: VerificationMatch[] = [];
   const targets = new Set(config.verification.targets);
+  const reservedBasePaths = getReservedPageBasePaths(config);
   const categoryBasePath = normalizeBasePath(config.verification.categoryBasePath);
+  const postKey = normalizeWordPressPostUrl(url, config.postRoute.urlPath, config.siteUrl);
 
   if (targets.has("posts")) {
-    const key = normalizeWordPressPostUrl(url, config.postRoute.urlPath);
-    if (key) {
-      matches.push({ target: "posts", key });
+    if (postKey) {
+      matches.push({ target: "posts", key: postKey });
     }
   }
 
   if (targets.has("categories") && pathname.startsWith(categoryBasePath)) {
     const remainder = pathname.slice(categoryBasePath.length);
     const key = normalizeKey(remainder);
-    if (key && !key.includes("/")) {
+    if (key) {
       matches.push({ target: "categories", key });
     }
   }
 
-  if (targets.has("pages") && isSingleSegment(pathname) && !pathname.startsWith(categoryBasePath)) {
-    matches.push({ target: "pages", key: normalizeKey(pathname) });
+  if (
+    targets.has("pages") &&
+    shouldTreatAsPagePath(pathname, postKey, reservedBasePaths)
+  ) {
+    matches.push({ target: "pages", key: pageKeyFromPathname(pathname) });
   }
 
   return matches;
@@ -128,14 +190,32 @@ export function contentPathToKey(
     }
   }
 
-  if (config.verification.targets.includes("pages") && /^[^/]+\.md$/i.test(relativePath)) {
-    return { target: "pages", key: normalizeKey(relativePath.replace(/\.md$/i, "")) };
+  if (
+    config.verification.targets.includes("pages") &&
+    (
+      relativePath === "_index.md" ||
+      (
+        relativePath.endsWith("/index.md") &&
+        !isReservedPageContentPath(relativePath, config) &&
+        !normalizeHugoPostPath(filePath, contentDir, config.postRoute)
+      ) ||
+      (/\.md$/i.test(relativePath) && !isReservedPageContentPath(relativePath, config))
+    )
+  ) {
+    return {
+      target: "pages",
+      key: relativePath === "_index.md"
+        ? ""
+        : relativePath.endsWith("/index.md")
+          ? normalizeKey(relativePath.replace(/\/index\.md$/i, ""))
+          : normalizeKey(relativePath.replace(/\.md$/i, "")),
+    };
   }
 
   if (
     config.verification.targets.includes("categories") &&
     normalizedPath.endsWith("/_index.md") &&
-    /^categories\/[^/]+\/_index\.md$/i.test(relativePath)
+    /^categories\/.+\/_index\.md$/i.test(relativePath)
   ) {
     return {
       target: "categories",
@@ -146,18 +226,28 @@ export function contentPathToKey(
   return null;
 }
 
-export function publicPathToKey(
+export function publicPathToMatches(
   filePath: string,
   publicDir: string,
   config: ResolvedConfig,
-): VerificationMatch | null {
+): VerificationMatch[] {
   const relativePath = path.relative(publicDir, filePath).replace(/\\/g, "/");
+  if (relativePath === "index.html") {
+    if (config.verification.targets.includes("pages")) {
+      return [{ target: "pages", key: "" }];
+    }
+    return [];
+  }
+
   if (!relativePath.endsWith("/index.html")) {
-    return null;
+    return [];
   }
 
   const routePath = `/${relativePath.replace(/\/index\.html$/i, "")}/`;
+  const reservedBasePaths = getReservedPageBasePaths(config);
   const categoryBasePath = normalizeBasePath(config.verification.categoryBasePath);
+  const postKey = normalizeWordPressPostUrl(`https://example.com${routePath}`, config.postRoute.urlPath);
+  const matches: VerificationMatch[] = [];
 
   if (
     config.verification.targets.includes("categories") &&
@@ -165,27 +255,32 @@ export function publicPathToKey(
   ) {
     const remainder = routePath.slice(categoryBasePath.length);
     const key = normalizeKey(remainder);
-    if (key && !key.includes("/")) {
-      return { target: "categories", key };
+    if (key) {
+      matches.push({ target: "categories", key });
     }
+  }
+
+  if (config.verification.targets.includes("posts") && postKey) {
+    matches.push({ target: "posts", key: postKey });
   }
 
   if (
     config.verification.targets.includes("pages") &&
-    isSingleSegment(routePath) &&
-    !routePath.startsWith(categoryBasePath)
+    shouldTreatAsPagePath(routePath, postKey, reservedBasePaths)
   ) {
-    return { target: "pages", key: normalizeKey(routePath) };
+    matches.push({ target: "pages", key: pageKeyFromPathname(routePath) });
   }
 
-  if (config.verification.targets.includes("posts")) {
-    const postKey = normalizeWordPressPostUrl(`https://example.com${routePath}`, config.postRoute.urlPath);
-    if (postKey) {
-      return { target: "posts", key: postKey };
-    }
-  }
+  return matches;
+}
 
-  return null;
+export function publicPathToKey(
+  filePath: string,
+  publicDir: string,
+  config: ResolvedConfig,
+): VerificationMatch | null {
+  const matches = publicPathToMatches(filePath, publicDir, config);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 export function collectRouteKeys(config: ResolvedConfig): VerificationKeySets {
@@ -200,7 +295,7 @@ export function collectRouteKeys(config: ResolvedConfig): VerificationKeySets {
 
   if (sources.has("public")) {
     for (const filePath of walkFiles(config.verification.publicDir, (candidate) => candidate.endsWith("index.html"))) {
-      addMatch(publicPathToKey(filePath, config.verification.publicDir, config), discovered);
+      addMatches(publicPathToMatches(filePath, config.verification.publicDir, config), discovered);
     }
   }
 

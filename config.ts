@@ -62,6 +62,17 @@ const DEFAULT_VERIFICATION = {
   categoryBasePath: "/category/",
 };
 
+const ALLOWED_VERIFICATION_TARGETS = new Set<VerificationTarget>([
+  "posts",
+  "pages",
+  "categories",
+]);
+
+const ALLOWED_VERIFICATION_SOURCES = new Set<VerificationSource>([
+  "content",
+  "public",
+]);
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -74,6 +85,27 @@ function resolveConfigPath(configPath?: string): string {
     return path.resolve(process.env.WP_TO_HUGO_CONFIG);
   }
   return path.resolve(process.cwd(), "wp-config.json");
+}
+
+function validateEnumList(
+  values: unknown,
+  allowedValues: Set<string>,
+  label: string,
+  invalidValueLabel: string,
+): void {
+  if (values === undefined) {
+    return;
+  }
+
+  if (!Array.isArray(values)) {
+    throw new Error(`${label} must be an array`);
+  }
+
+  for (const value of values) {
+    if (typeof value !== "string" || !allowedValues.has(value)) {
+      throw new Error(`Invalid ${invalidValueLabel}: ${String(value)}`);
+    }
+  }
 }
 
 export function loadConfig(configPath?: string): ResolvedConfig {
@@ -94,6 +126,19 @@ export function loadConfig(configPath?: string): ResolvedConfig {
     console.error("Error: siteUrl is required in wp-config.json");
     process.exit(1);
   }
+
+  validateEnumList(
+    raw.verification?.targets,
+    ALLOWED_VERIFICATION_TARGETS,
+    "verification.targets",
+    "verification target",
+  );
+  validateEnumList(
+    raw.verification?.sources,
+    ALLOWED_VERIFICATION_SOURCES,
+    "verification.sources",
+    "verification source",
+  );
 
   const configDir = path.dirname(resolvedConfigPath);
   const siteUrl = raw.siteUrl.replace(/\/+$/, "");
