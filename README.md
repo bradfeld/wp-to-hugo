@@ -54,6 +54,10 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
 {
   "siteUrl": "https://yoursite.com",
   "contentDir": "./content",
+  "postRoute": {
+    "contentPath": "archives/:year/:month/:slug",
+    "urlPath": "/archives/:year/:month/:slug/"
+  },
   "customPostTypes": [
     { "type": "book", "section": "books" },
     { "type": "portfolio", "section": "portfolio" }
@@ -64,8 +68,49 @@ Edit `wp-config.json` (copy from `wp-config.example.json`):
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `siteUrl` | Yes | — | Your WordPress site URL (no trailing slash) |
-| `contentDir` | No | `./content` | Where to write Hugo content files (relative to repo root) |
+| `contentDir` | No | `./content` | Where to write Hugo content files (relative to `wp-config.json`) |
+| `postRoute.contentPath` | No | `archives/:year/:month/:slug` | Hugo bundle path pattern for exported posts |
+| `postRoute.urlPath` | No | `/archives/:year/:month/:slug/` | WordPress URL pattern used for verification and URL planning |
 | `customPostTypes` | No | `[]` | WordPress custom post type endpoints and their Hugo content directories |
+
+### Post Routes
+
+Post export and verification share the same route config. If you omit `postRoute`, the original archive behavior stays unchanged:
+
+- post bundles are written to `content/archives/YYYY/MM/slug/index.md`
+- verification matches `/archives/YYYY/MM/slug/`
+
+Supported route tokens are:
+
+- `:slug`
+- `:id`
+- `:year`
+- `:month`
+- `:day`
+
+Example slug-only route:
+
+```json
+{
+  "postRoute": {
+    "contentPath": "posts/:slug",
+    "urlPath": "/:slug/"
+  }
+}
+```
+
+Example day-dated route:
+
+```json
+{
+  "postRoute": {
+    "contentPath": "posts/:year/:month/:day/:slug",
+    "urlPath": "/:year/:month/:day/:slug/"
+  }
+}
+```
+
+Hugo still needs matching permalink rules for whichever `urlPath` you choose. The exporter only controls where content is written and how verification normalizes WordPress URLs.
 
 ### Custom Post Types
 
@@ -102,6 +147,8 @@ To preserve WordPress URLs, add this to your `hugo.toml`:
 ```
 
 This maps `content/archives/2024/03/my-post/index.md` to `/archives/2024/03/my-post/` — the same URL structure WordPress uses.
+
+If you change `postRoute`, update your Hugo permalinks to match that URL pattern. The default archive route is only the fallback.
 
 ## How It Works
 

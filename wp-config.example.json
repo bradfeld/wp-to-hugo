@@ -1,6 +1,10 @@
 {
   "siteUrl": "https://example.com",
   "contentDir": "./content",
+  "postRoute": {
+    "contentPath": "archives/:year/:month/:slug",
+    "urlPath": "/archives/:year/:month/:slug/"
+  },
   "customPostTypes": [
     { "type": "book", "section": "books" },
     { "type": "portfolio", "section": "portfolio" }
