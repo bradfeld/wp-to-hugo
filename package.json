@@ -10,7 +10,8 @@
     "export-custom": "tsx export-custom-types.ts",
     "media": "tsx wp-media-download.ts",
     "fix-entities": "tsx fix-entities.ts",
-    "verify": "tsx wp-verify.ts"
+    "verify": "tsx wp-verify.ts",
+    "test": "node --import tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
     "@types/node": "^25.3.5",
